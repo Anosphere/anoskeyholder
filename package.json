@@ -1,0 +1,27 @@
+{
+  "name": "keyholdersoftware",
+  "version": "0.1.0",
+  "description": "The keyholder server: an Express 5 server backed by PostgreSQL that holds Shamir shares",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file=.env-keyholder$KEYHOLDER src/server.js",
+    "dev": "node --watch --env-file=.env-keyholder$KEYHOLDER src/server.js",
+    "db:setup": "sh scripts/setup-db.sh",
+    "db:reset": "sh scripts/reset-db.sh",
+    "db:grant-anos-read": "sh scripts/grant-anos-read.sh",
+    "make-keys": "node scripts/make-keys.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/kms": "^5.0.0",
+    "canonicalize": "^5.1.0",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
+  }
+}

@@ -528,6 +528,12 @@ fresh values for every key line.
 Every private value fails at boot when missing or the wrong length
 (`src/config/env.js`, as in the siblings).
 
+Since the testnet build (2026-10-27) these live in two files, the committed
+`network/testnet.env` and the machine file `.env`; the private values moved
+to the key file, the local KMS provider is gone, and `WEB_ORIGIN`,
+`MASTERPOD_URL`, `RECOVERY_POD_HOSTS` and `KMS_KEY_NAME` are required:
+section 14.
+
 ## 10. Scripts
 
 | Command | Description |
@@ -740,3 +746,186 @@ here; nothing above was changed.
   as the moderator's, opening to the same bytes, not just a `200`.
 - **No schema change, no grant change**: `stakes.attestor_stake` exists
   and `db:grant-anos-read` grants `SELECT` on the whole `stakes` table.
+
+## 14. Testnet readiness (2026-10-27)
+
+Built 2026-10-27 as the second half of testnet build 1, straight from
+`~/Desktop/Z-TestNet/forclaude/testnet-build-1-code-ready.md` (FINAL,
+decided in its planning chat), after the validator half in anossoftware.
+`~/Desktop/Z-TestNet` is the testnet tree: fresh repos, one network, no
+local development. Nothing about the routes, the tables, the wraps or the
+crypto changed. No check ran but `node --check` on each JavaScript file
+written or edited: the first boot on the validator 1 VM is the test.
+Sections 9, 10 and 12 describe the local setup as it was and stay as
+history: the `.env-keyholderN` files, `KEYHOLDER=N npm start` and the
+local KMS provider are gone.
+
+### 14.1 The decisions, as they apply to this repo
+
+- **Two env files per start.** `network/testnet.env`, committed, holds
+  every value that is the same on every VM, each line with a comment:
+  `PGHOST`, `PGPORT`, `PGUSER=keyholdersoftware`, `PGDATABASE=keyholder`,
+  `ANOS_PGHOST`, `ANOS_PGPORT`, `ANOS_PGUSER=keyholder_reader`,
+  `ANOS_PGDATABASE=anos`, `PORT=3200`, `STAKE_MIN_MODERATOR_ANOS=1000`,
+  `STAKE_MIN_ATTESTOR_ANOS=1000`, `WEB_ORIGIN`, `MASTERPOD_URL` and
+  `RECOVERY_POD_HOSTS` as `<fill in>`, `TIMESTAMP_WINDOW_SECONDS=120`.
+  `.env`, git-ignored, holds what differs per machine: `KEYHOLDER_ID`,
+  `PGPASSWORD`, `ANOS_PGPASSWORD`, `KEY_FILE`, then `KMS_KEY_NAME`,
+  `HOME_X25519_PUBLIC_KEY`, `HOME_MLKEM_PUBLIC_KEY`, `KEYHOLDER_PUBLIC_KEY_1`,
+  `KEYHOLDER_PUBLIC_KEY_2`. `npm start`, `npm run dev` and the unit run
+  `node --env-file=network/testnet.env --env-file=.env src/server.js`; Node
+  applies later files over earlier ones (Node 24.22.0, checked in the
+  planning chat). No `KEYHOLDER` start variable: the id is a line in `.env`.
+- **`<fill in>`.** The three addresses in the shared file are filled by the
+  user once the Hetzner load balancers have DNS names (`MASTERPOD_URL` and
+  `RECOVERY_POD_HOSTS` from the masterpod's, `WEB_ORIGIN` from the wallet's;
+  the masterpod's own `RECOVERY_POD_URL_BASE` must be built from the same
+  host); the five lines in `.env` are filled by the operator at the visit.
+  `required()` in `env.js` refuses the literal with `X is still
+  "<fill in>": fill it in network/testnet.env or .env`; every other
+  required helper (`requiredInteger`, `requiredHex`, `requiredAnos`, the
+  list parsers) goes through it. A keyholder refuses to start until every
+  one is filled, by design.
+- **The key file.** `KEY_FILE` names it (default `./keyholder.key`), JSON
+  `{ "receivingX25519PrivateKey", "receivingMlkemPrivateKey", "bucketOneKey" }`:
+  PKCS#8 DER hex of 48 and 86 bytes as before, and 32 bytes hex; mode 0600,
+  written once with the exclusive-create flag. `src/crypto/key-file.js`
+  `readKeyFile(path, fields)` refuses a file that is missing, not a regular
+  file, unreadable, or has any group or other bit set, naming the path and
+  the mode, then requires each field to be lowercase hex of its length;
+  `keyholder-keys.js` reads it and runs the same loaders as before.
+  `RECEIVING_X25519_PRIVATE_KEY`, `RECEIVING_MLKEM_PRIVATE_KEY`,
+  `BUCKET_ONE_KEY` and `KMS_LOCAL_KEY` left the env. `HOME_X25519_PUBLIC_KEY`,
+  `HOME_MLKEM_PUBLIC_KEY`, `KEYHOLDER_PUBLIC_KEY_1`, `KEYHOLDER_PUBLIC_KEY_2`
+  and `KMS_KEY_NAME` stay in `.env`: public halves from the operator's GUI
+  and YubiKeys, and a resource name.
+- **make-keys writes; nothing is pasted.** `npm run make-keys -- --id <N>
+  [--key-file <path>]`: both existence checks before any write, then the
+  key file (`wx`, 0600) with a fresh receiving pair and 32 random bytes as
+  `bucketOneKey`, and `.env` (`wx`, 0644 so `sudo -u postgres` can read it;
+  tightening it to 0600 is testnet-month work) with `KEYHOLDER_ID`,
+  `PGPASSWORD` and `ANOS_PGPASSWORD` (32 hex characters each from
+  `randomBytes(16)`), `KEY_FILE`, and the five `<fill in>` lines, each
+  under a one-line comment saying what goes there. Prints `Keyholder <N>`,
+  the receiving public halves as information (x25519 32 bytes, mlkem 1568
+  bytes, raw hex; the keyholder serves them live and nobody records them),
+  the five lines left to fill, and the next commands. No stand-in home or
+  YubiKey keys are generated anywhere any more. A private key is never
+  printed.
+- **Cloud KMS only.** `src/kms/local.js` is deleted; `kms.js` is
+  `export { encrypt, decrypt } from './gcp.js'` with its comment rewritten;
+  `gcp.js` is unchanged. `env.js` reads `kms: { keyName: required('KMS_KEY_NAME') }`
+  and no longer reads `KMS_PROVIDER`. Each operator's key lives in the
+  operator's own Google Cloud project, in the region their VM is in; no
+  region appears in code or config, only inside `KMS_KEY_NAME`.
+- **The self-test at boot.** `src/server.js`, after the two database checks
+  and before listening: the fixed plaintext `anos keyholder kms self-test`
+  encrypted with the fixed aad `self-test` through `kms.js`, decrypted,
+  compared with `Buffer.equals`; `KMS ok`. A thrown error, a null from
+  decrypt, or bytes that differ log `KMS self-test failed: <message>` and
+  exit 1, like the two database checks.
+- **CORS from env.** `WEB_ORIGIN` is a required comma-separated list,
+  parsed as the masterpod's `optionalList` does but without a default;
+  `src/app.js` passes the frozen array to `cors`. `MASTERPOD_URL` (keeping
+  the trailing-slash strip) and `RECOVERY_POD_HOSTS` (keeping the
+  lowercasing) are required too. The dev defaults `http://localhost:4200`,
+  `http://localhost:3100` and `localhost,127.0.0.1` left the code; `PORT`,
+  the hosts and ports, `TIMESTAMP_WINDOW_SECONDS` and the attestor minimum
+  keep their defaults, and the shared file names them anyway.
+- **Health.** `GET /health` answers `{ status, uptime, db, keyholder: { id },
+  version: { commit, tag } }`. `src/util/version.js` runs
+  `git rev-parse --short HEAD` and `git describe --tags --exact-match` once
+  at boot, each `null` when git or the repo is absent or the command fails.
+- **Boot log.** `Keyholder <id>`, the two PostgreSQL lines, `KMS ok`, then
+  listening.
+- **The unit.** `deploy/anos-keyholder.service`, identical on every VM: user
+  `anos`, `/opt/anos/keyholdersoftware`, `/usr/bin/node`,
+  `Restart=on-failure` every 5 s, `NoNewPrivileges`, `ProtectSystem=strict`,
+  `PrivateTmp`.
+- **The scripts.** `setup-db.sh`, `reset-db.sh` and `grant-anos-read.sh`
+  load `network/testnet.env` and then the machine file, default `.env`, in
+  that order, inside the per-file subshell; comments and messages updated.
+- **The VM.** Debian 13, PostgreSQL 17 from Debian's own packages, Node 24
+  from NodeSource, service user `anos`, both repos under `/opt/anos`, no
+  external IP (the doorman holds it). The install is anossoftware's
+  `docs/operator-guide.md`.
+
+### 14.2 Files and variables
+
+New: `src/crypto/key-file.js`, `src/util/version.js`, `network/testnet.env`,
+`deploy/anos-keyholder.service`, `.example.env` (the first tracked example
+here).
+
+Changed: `src/config/env.js`, `src/crypto/keyholder-keys.js`,
+`src/kms/kms.js`, `src/server.js`, `src/app.js`,
+`src/health/health.router.js`, `src/health/health.service.js`,
+`scripts/make-keys.js` (rewritten), `scripts/setup-db.sh`,
+`scripts/reset-db.sh`, `scripts/grant-anos-read.sh`, `package.json`,
+`.gitignore` (`*.key` added), `README.md`, this file.
+
+Deleted: `src/kms/local.js`.
+
+| Variable | Where | Value |
+| -------- | ----- | ----- |
+| `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE` | shared | `127.0.0.1`, `5432`, `keyholdersoftware`, `keyholder` |
+| `ANOS_PGHOST`, `ANOS_PGPORT`, `ANOS_PGUSER`, `ANOS_PGDATABASE` | shared | `127.0.0.1`, `5432`, `keyholder_reader`, `anos` |
+| `PORT` | shared | `3200` |
+| `STAKE_MIN_MODERATOR_ANOS`, `STAKE_MIN_ATTESTOR_ANOS` | shared | `1000`, `1000` |
+| `WEB_ORIGIN`, `MASTERPOD_URL`, `RECOVERY_POD_HOSTS` | shared | `<fill in>` |
+| `TIMESTAMP_WINDOW_SECONDS` | shared | `120` |
+| `KEYHOLDER_ID`, `PGPASSWORD`, `ANOS_PGPASSWORD`, `KEY_FILE` | machine (`.env`, from make-keys) | the id, 32 hex characters twice, `./keyholder.key` |
+| `KMS_KEY_NAME`, `HOME_X25519_PUBLIC_KEY`, `HOME_MLKEM_PUBLIC_KEY`, `KEYHOLDER_PUBLIC_KEY_1`, `KEYHOLDER_PUBLIC_KEY_2` | machine (`.env`, filled by the operator) | `<fill in>` until filled |
+
+Gone: `RECEIVING_X25519_PRIVATE_KEY`, `RECEIVING_MLKEM_PRIVATE_KEY`,
+`BUCKET_ONE_KEY`, `KMS_PROVIDER`, `KMS_LOCAL_KEY`, the `KEYHOLDER` start
+variable, the `.env-keyholderN` files.
+
+### 14.3 Notes from the build
+
+Where the plan was silent, the simplest thing was chosen and is recorded
+here; nothing in 14.1 was changed.
+
+- **`<fill in>` is double-quoted in both env files**
+  (`KMS_KEY_NAME="<fill in>"`). The three database scripts source
+  `network/testnet.env` and `.env` with `sh`, where a bare `<fill in>` is a
+  redirection. Node's `--env-file` strips single, double or backtick
+  quotes, so `env.js` still sees the literal `<fill in>` and refuses it.
+  The values may be filled with or without quotes. make-keys writes the
+  five lines quoted the same way.
+- **The list parsers.** `requiredList(name)` is the masterpod's parser
+  through `required()`, and `requiredHostList(name)` lowercases its items
+  on top of it; the old `requiredHostList(name, fallback)` is gone.
+- **Paths are resolved against the repo root**, not the working directory:
+  `key-file.js` and `version.js` locate the repo from `import.meta.url`,
+  and `make-keys.js` writes `.env` and a relative `--key-file` there. `npm`
+  and the unit run in the repo root anyway.
+- **`.env` is chmod-ed to 0644 after the write**, so an operator's umask
+  cannot leave it unreadable to postgres. The key file is created 0600
+  under `wx` and never chmod-ed: a umask can only narrow that, and anything
+  narrower still passes the server's check.
+- **make-keys reuses its own helpers** (`hybridPair`, `rawPublic`,
+  `pkcs8Hex`, `hex`); `p256Pair` and the P-256 entries of the prefix tables
+  went with the stand-in YubiKeys. `hybrid.js` `generateHybridKeyPair`
+  stays, unused by the script as before.
+- **The `KMS_KEY_NAME` comment** make-keys writes is one long line that
+  carries the resource name pattern with the id filled in
+  (`.../cryptoKeys/keyholder-<N>`), so the operator copies the shape.
+- **The self-test** also fails when decrypt returns bytes that are not the
+  plaintext (`the plaintext came back changed`), beside the null case
+  (`the ciphertext did not decrypt under the key`); both land in
+  `KMS self-test failed: <message>`.
+- **Comments elsewhere stay as history**: `src/crypto/aead.js` still lists
+  "the local KMS provider" among its users and `src/shares/wraps.js` still
+  names `BUCKET_ONE_KEY` as the bucket-one wrap's key. Neither file is in
+  the approved list; the key is the same bytes, read from the key file now.
+- **Health** composes the fixed facts in `health.service.js` `identity()`
+  and the router spreads them into the answer, as in anossoftware.
+- **`version.js`** is the same file as anossoftware's, its own copy: git
+  with `cwd` the repo root and stderr ignored; a non-zero exit, a missing
+  binary or empty output is `null`.
+- **`engines`** stays at Node 24 or newer.
+- **One line outside the listed README sections changed**: the `psql`
+  one-liner under Database tables sourced `.env-keyholder1`, a file that
+  no longer exists; it now sources the two files.
+- **`node --check`** passed on the ten JavaScript files written or edited.
+  Nothing booted, no database was touched, no scratch file was written.

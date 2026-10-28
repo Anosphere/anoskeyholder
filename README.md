@@ -33,30 +33,31 @@ encrypted and read back by moderators.
 
 ## Getting started
 
+On the VM, as the user `anos`, in `/opt/anos/keyholdersoftware`, after the
+validator; anossoftware's `docs/operator-guide.md` is the whole install,
+both servers, in the order of the visit:
+
 ```bash
-npm install
-npm run make-keys                 # prints the key lines; paste them into .env-keyholder1
-# write .env-keyholder1 from the Configuration section below; repeat for 2 to 5
-npm run db:setup                  # role, databases, schema
-npm run db:grant-anos-read        # the read-only role in each anos database
-KEYHOLDER=1 npm start             # one terminal per keyholder
+npm ci
+npm run make-keys -- --id <N>                   # keyholder.key (mode 0600) and .env; five lines in .env to fill
+sudo -u postgres sh scripts/setup-db.sh         # role, database, schema
+sudo -u postgres sh scripts/grant-anos-read.sh  # the read-only role in the anos database
+npm start                                       # loads network/testnet.env, then .env
 ```
 
-Then `POST http://localhost:3201/get-keyholder-public-key` with `{}` answers
-keyholder 1's receiving key. The web app that drives it is
-`~/Desktop/Z/test/keyholder-test-web-app` (`ng serve` on 4200), which deposits
-shares on `http://localhost:3201` to `3205`.
+Then `POST http://127.0.0.1:3200/get-keyholder-public-key` with `{}` on the
+VM answers this keyholder's receiving key.
 
 ## Scripts
 
 | Command                          | Description                                                                 |
 | -------------------------------- | --------------------------------------------------------------------------- |
-| `KEYHOLDER=N npm start`          | Run keyholder N (loads `.env-keyholderN`)                                   |
-| `KEYHOLDER=N npm run dev`        | Same, restarting on file changes                                            |
-| `npm run db:setup`               | For every `.env-keyholder<N>`: the role, the database, the schema (idempotent; adds missing tables to a live database). Pass a file to do just one. |
-| `npm run db:reset`               | Drop those databases and run setup again. Local data is lost; use after a change to an existing table. |
-| `npm run db:grant-anos-read`     | For every `.env-keyholder<N>`: in its anos database, as a superuser, create the `ANOS_PGUSER` role if missing, sync its password, grant `CONNECT`, `USAGE` on `public` and `SELECT` on `accounts` and `stakes`, nothing else. Pass a file to do just one. |
-| `npm run make-keys`              | Print fresh env lines: the receiving pair, a home pair (public for the env, private shown once for the home computer), two P-256 pairs standing in for YubiKeys (public for the env, private shown once), `BUCKET_ONE_KEY`, `KMS_LOCAL_KEY`. |
+| `npm start`                      | Run this keyholder: `node --env-file=network/testnet.env --env-file=.env src/server.js` |
+| `npm run dev`                    | Same, restarting on file changes                                            |
+| `npm run make-keys -- --id <N>`  | Once, on the VM: the receiving pair and the bucket-one key into `keyholder.key` (JSON, mode 0600, never shown) and `.env` with the id, two random database passwords, the key file's path and five `<fill in>` lines (the Cloud KMS key name, the home computer's two public halves, the two YubiKeys' public keys). Refuses to run when either file exists. Prints the receiving public halves and the lines to fill; nothing to paste. `--key-file <path>` puts the key elsewhere. |
+| `npm run db:setup`               | Create the role, the database and the schema (idempotent; adds missing tables to a live database). Loads `network/testnet.env` then `.env`; pass a machine file to use another. On the VM: `sudo -u postgres sh scripts/setup-db.sh`. |
+| `npm run db:reset`               | Drop that database and run setup again. Everything in it is lost.          |
+| `npm run db:grant-anos-read`     | In the anos database, as a superuser: create the `ANOS_PGUSER` role if missing, sync its password, grant `CONNECT`, `USAGE` on `public` and `SELECT` on `accounts` and `stakes`, nothing else. The same two files. On the VM: `sudo -u postgres sh scripts/grant-anos-read.sh`. |
 
 ## Who may call what
 
@@ -163,10 +164,12 @@ share the home computer hands back, to forward it. It never holds a whole
 secret and never writes a plaintext share to disk or log.
 
 The KMS (`src/kms/`) has one interface, `encrypt(plaintext, aad)` and
-`decrypt(ciphertext, aad)`, and two providers chosen by `KMS_PROVIDER`:
-`gcp` (`@google-cloud/kms` on the key `KMS_KEY_NAME`, credentials from the
-VM's service account) and `local` (AES-256-GCM under `KMS_LOCAL_KEY`, for
-this Mac).
+`decrypt(ciphertext, aad)`, and one provider, Cloud KMS (`gcp.js`:
+`@google-cloud/kms` on the key `KMS_KEY_NAME`, protection level HSM, in the
+operator's own project and region, credentials from the VM's service
+account); `kms.js` re-exports it. At boot the server encrypts and decrypts
+a fixed plaintext through it and logs `KMS ok`, or stops with
+`KMS self-test failed: <reason>`.
 
 Encrypting to a hybrid key (`src/crypto/hybrid.js`, spec 7.1): a fresh X25519
 pair `e`, `ss1 = X25519(e, R.x25519)`, `(ct, ss2) = ML-KEM-1024.Encaps(R.mlkem)`,
@@ -191,154 +194,139 @@ Because the names follow libpq, `psql` connects to a keyholder's database with
 no arguments once its file is loaded:
 
 ```bash
-set -a && source .env-keyholder1 && set +a && psql
+set -a && . network/testnet.env && . .env && set +a && psql
 ```
 
 ## Configuration
 
-One keyholder = one process = one file `.env-keyholderN`, started with
-`KEYHOLDER=N npm start` (`node --env-file=.env-keyholder$KEYHOLDER
-src/server.js`), as the validators are. The files are git-ignored and there
-is no example file in the repository; this is `.env-keyholder1` for the
-local setup, with the key lines from `npm run make-keys`:
+Two env files, loaded in this order by `npm start` and by the systemd unit
+(`node --env-file=network/testnet.env --env-file=.env src/server.js`); where
+both name a variable the later file wins. `src/config/env.js` reads them
+once at boot.
 
-```bash
-PORT=3201
-KEYHOLDER_ID=1
+- `network/testnet.env`, committed: every value that is the same on every
+  VM of the testnet. No secrets. Each line has a comment.
+- `.env`, git-ignored: what differs per machine, written by
+  `npm run make-keys -- --id <N>`: four lines with values and five left as
+  `<fill in>` for the operator, each under a comment saying what goes there.
+  `.example.env` shows them.
 
-# The keyholder's own database.
-PGHOST=127.0.0.1
-PGPORT=5432
-PGDATABASE=keyholder1
-PGUSER=keyholdersoftware
-PGPASSWORD=<a password>
+Shared values, in `network/testnet.env`:
 
-# The validator's anos database, read only.
-ANOS_PGHOST=127.0.0.1
-ANOS_PGPORT=5432
-ANOS_PGDATABASE=anos1
-ANOS_PGUSER=keyholder_reader
-ANOS_PGPASSWORD=<a password>
+| Variable                         | Testnet                            | Description                                                                 |
+| -------------------------------- | ---------------------------------- | --------------------------------------------------------------------------- |
+| `PGHOST`, `PGPORT`               | `127.0.0.1`, `5432`                | The keyholder's own database server, the VM itself                          |
+| `PGUSER`, `PGDATABASE`           | `keyholdersoftware`, `keyholder`   | Its role and database                                                       |
+| `ANOS_PGHOST`, `ANOS_PGPORT`     | `127.0.0.1`, `5432`                | The validator's anos database server, the same VM                           |
+| `ANOS_PGUSER`, `ANOS_PGDATABASE` | `keyholder_reader`, `anos`         | The read-only role and the database                                         |
+| `PORT`                           | `3200`                             | Port the server listens on, behind the doorman                              |
+| `STAKE_MIN_MODERATOR_ANOS`       | `1000`                             | Whole anos, the same value as the validator's; converted to millionths once |
+| `STAKE_MIN_ATTESTOR_ANOS`        | `1000`                             | Whole anos, the same value as the validator's; attestor stake at or above it admits an account to the two bucket key routes; `1000` when the line is absent |
+| `WEB_ORIGIN`                     | `<fill in>`                        | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
+| `MASTERPOD_URL`                  | `<fill in>`                        | The masterpod's load balancer, scheme, host and port, no path: where `/get-anopod-session-keys` is |
+| `RECOVERY_POD_HOSTS`             | `<fill in>`                        | Comma-separated hosts a decrypt route may post a share to: the masterpod's load balancer host alone, no scheme, no port |
+| `TIMESTAMP_WINDOW_SECONDS`       | `120`                              | Allowed clock difference on a signed request, each way; nonces live twice this long |
 
-# Whole anos, the same values as the validator's env. The attestor minimum
-# defaults to 1000 when its line is missing.
-STAKE_MIN_MODERATOR_ANOS=1000
-STAKE_MIN_ATTESTOR_ANOS=1000
+Machine values, in `.env`:
 
-WEB_ORIGIN=http://localhost:4200
-MASTERPOD_URL=http://localhost:3100
-RECOVERY_POD_HOSTS=localhost,127.0.0.1
-TIMESTAMP_WINDOW_SECONDS=120
+| Variable                                           | Description                                                                 |
+| -------------------------------------------------- | --------------------------------------------------------------------------- |
+| `KEYHOLDER_ID`                                     | This keyholder's number, its validator's id; answered as `keyholderId`      |
+| `PGPASSWORD`                                       | The keyholder's own role's password, 32 hex characters from make-keys       |
+| `ANOS_PGPASSWORD`                                  | The read-only role's password, 32 hex characters from make-keys             |
+| `KEY_FILE`                                         | The key file, relative to the repo root or absolute; `./keyholder.key` when the line is absent. JSON `{ receivingX25519PrivateKey, receivingMlkemPrivateKey, bucketOneKey }` (PKCS#8 DER hex of 48 and 86 bytes, and 32 bytes hex), mode 0600: the server refuses a file that is missing, not a regular file, unreadable, or readable by group or other, naming the path and the mode |
+| `KMS_KEY_NAME`                                     | `<fill in>` from make-keys: the Cloud KMS key, `projects/<project>/locations/<region>/keyRings/anos-testnet/cryptoKeys/keyholder-<N>`, protection level HSM |
+| `HOME_X25519_PUBLIC_KEY`, `HOME_MLKEM_PUBLIC_KEY`  | `<fill in>` from make-keys: the home computer's hybrid public key, raw hex (32 and 1568 bytes), from the operator's keyholder GUI |
+| `KEYHOLDER_PUBLIC_KEY_1`, `KEYHOLDER_PUBLIC_KEY_2` | `<fill in>` from make-keys: the two YubiKeys' P-256 public keys, 33 bytes hex, from the same GUI |
 
-# From npm run make-keys: PKCS#8 DER in hex, 48 and 86 bytes.
-RECEIVING_X25519_PRIVATE_KEY=<96 hex characters>
-RECEIVING_MLKEM_PRIVATE_KEY=<172 hex characters>
+`src/config/env.js` checks all of them at boot: `KEYHOLDER_ID` and the
+stake minimums as positive integers, the public keys as hex of the right
+length, `WEB_ORIGIN` and `RECOVERY_POD_HOSTS` as lists with at least one
+item (hosts lowercased), the rest as present. A value still `<fill in>` is
+refused by name: `KMS_KEY_NAME is still "<fill in>": fill it in
+network/testnet.env or .env`. `PORT`, the two hosts and ports,
+`TIMESTAMP_WINDOW_SECONDS` and the attestor minimum keep their defaults in
+the code, though the shared file names them too. The key file is read and
+the receiving pair loaded into key objects at boot
+(`src/crypto/keyholder-keys.js`), so a value that is hex of the right
+length but not a key fails there.
 
-# From npm run make-keys: the home computer's public halves, raw hex, 32 and 1568 bytes.
-HOME_X25519_PUBLIC_KEY=<64 hex characters>
-HOME_MLKEM_PUBLIC_KEY=<3136 hex characters>
+The `<fill in>` values are double-quoted in both files because the
+database scripts source them with `sh`, which would read a bare `<` as a
+redirection; Node strips the quotes.
 
-# The two YubiKeys' P-256 public keys, 33-byte compressed points (or the stand-ins from make-keys).
-KEYHOLDER_PUBLIC_KEY_1=<66 hex characters>
-KEYHOLDER_PUBLIC_KEY_2=<66 hex characters>
+## Running
 
-# 32 bytes hex each.
-BUCKET_ONE_KEY=<64 hex characters>
-KMS_PROVIDER=local
-KMS_LOCAL_KEY=<64 hex characters>
+One VM is one validator and one keyholder: one keyholder process, started
+by `npm start` or by the systemd unit `deploy/anos-keyholder.service`,
+which runs the same command as the user `anos` in
+`/opt/anos/keyholdersoftware` and restarts it five seconds after a
+failure. The boot log, in order:
+
+```
+Keyholder <id>
+Connected to PostgreSQL 17.x at 127.0.0.1:5432/keyholder
+Connected to the anos database (PostgreSQL 17.x) at 127.0.0.1:5432/anos, read only
+KMS ok
+Keyholder <id> listening on http://localhost:3200
 ```
 
-| Variable                                                                    | Default                 | Description                                                                                   |
-| --------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------- |
-| `PORT`                                                                      | `3200`                  | Port the server listens on (`3201` to `3205` locally)                                         |
-| `KEYHOLDER_ID`                                                              | required                | This keyholder's number, its validator's id; answered as `keyholderId`                        |
-| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`                    | host `127.0.0.1`, port `5432`, rest required | The keyholder's own database: `keyholder1` to `keyholder5`, role `keyholdersoftware` locally |
-| `ANOS_PGHOST`, `ANOS_PGPORT`, `ANOS_PGDATABASE`, `ANOS_PGUSER`, `ANOS_PGPASSWORD` | host `127.0.0.1`, port `5432`, rest required | The validator's anos database, read only: `anos1` to `anos5` locally, `anos` on a VM, role `keyholder_reader` |
-| `STAKE_MIN_MODERATOR_ANOS`                                                  | required                | Whole anos, the same value as the validator's env; converted to millionths once               |
-| `STAKE_MIN_ATTESTOR_ANOS`                                                   | `1000`                  | Whole anos, the same value as the validator's env; attestor stake at or above it admits an account to the two bucket key routes; converted to millionths once |
-| `WEB_ORIGIN`                                                                | `http://localhost:4200` | CORS allow-list, the phone                                                                    |
-| `MASTERPOD_URL`                                                             | `http://localhost:3100` | Where `/get-anopod-session-keys` is                                                           |
-| `RECOVERY_POD_HOSTS`                                                        | `localhost,127.0.0.1`   | Comma-separated hosts a decrypt route may post to                                             |
-| `TIMESTAMP_WINDOW_SECONDS`                                                  | `120`                   | Allowed clock difference on a signed request, each way; nonces live twice this long           |
-| `RECEIVING_X25519_PRIVATE_KEY`, `RECEIVING_MLKEM_PRIVATE_KEY`               | required                | The receiving key pair, PKCS#8 DER hex (48 and 86 bytes)                                      |
-| `HOME_X25519_PUBLIC_KEY`, `HOME_MLKEM_PUBLIC_KEY`                           | required                | The home computer's hybrid public key, raw hex (32 and 1568 bytes)                            |
-| `KEYHOLDER_PUBLIC_KEY_1`, `KEYHOLDER_PUBLIC_KEY_2`                          | required                | The two YubiKeys' P-256 public keys, 33 bytes hex                                             |
-| `BUCKET_ONE_KEY`                                                            | required                | 32 bytes hex, wraps bucket-one shares                                                         |
-| `KMS_PROVIDER`                                                              | `local`                 | `local` or `gcp`                                                                              |
-| `KMS_LOCAL_KEY`                                                             | required when `local`   | 32 bytes hex                                                                                  |
-| `KMS_KEY_NAME`                                                              | required when `gcp`     | `projects/.../locations/.../keyRings/.../cryptoKeys/...`, protection level HSM                 |
-
-`src/config/env.js` checks all of them at boot: every private value fails
-when missing or the wrong length, `KMS_PROVIDER` must be one of the two and
-its one variable present. The receiving key pair is loaded into key objects
-at boot too (`src/crypto/keyholder-keys.js`), so a value that is hex of the
-right length but not a key fails there.
-
-## Running five keyholders
-
-Each keyholder is one process with its own file, `.env-keyholder1` to
-`.env-keyholder5`. They listen on 3201 to 3205, use databases `keyholder1`
-to `keyholder5` under the role `keyholdersoftware`, and read `anos1` to
-`anos5` as `keyholder_reader`, all in the one local PostgreSQL. Each needs
-its own `npm run make-keys` output, or the five receiving keys would be the
-same; the home key and the YubiKey keys may well be shared.
-
-```bash
-npm run db:setup              # five databases
-npm run db:grant-anos-read    # keyholder_reader in anos1 to anos5
-KEYHOLDER=1 npm start         # one terminal per keyholder
-```
-
-The masterpod must be up on `MASTERPOD_URL` for `/receive-share` to verify a
-pod; the moderator routes need the validator's anos database and nothing
-else.
+A configuration error stops the process with a message naming the
+variable, the key file or the KMS failure; under systemd it is retried
+every five seconds, and `journalctl -fu anos-keyholder` shows the reason
+each time. The masterpod must be up on `MASTERPOD_URL` for `/receive-share`
+to verify a pod; the moderator routes need the validator's anos database
+and nothing else.
 
 ## On a validator's VM
 
-One VM is one validator and one keyholder, so the VM has one
-`.env-keyholder1` (or whatever the validator's id is) with `PGDATABASE` its
-own database, `ANOS_PGDATABASE=anos`, `KMS_PROVIDER=gcp` and `KMS_KEY_NAME`
-a Cloud KMS key whose protection level is HSM. The VM's service account needs
-`roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key and nothing more;
-the client reads its credentials from the VM. The home computer's private key
-never touches the VM; `make-keys` prints it once, on the machine that runs it.
+The install, both servers on one Debian 13 worker VM, is anossoftware's
+`docs/operator-guide.md`: the VM and its packages, the Cloud KMS key in the
+operator's own project and the VM's region, the user `anos` and the two
+clones under `/opt/anos`, `make-keys` in each repo, the databases, the
+registry row and the systemd units, in the order of the onboarding visit.
 
-```bash
-sudo -u postgres sh scripts/setup-db.sh .env-keyholder1
-sudo -u postgres sh scripts/grant-anos-read.sh .env-keyholder1
-KEYHOLDER=1 npm start
-```
+At boot the keyholder round-trips a fixed plaintext through that key and
+logs `KMS ok`; a wrong key name, a missing role on the key or an
+unreachable API stops it with `KMS self-test failed: <reason>` before it
+listens. The home computer's private key and the YubiKeys' private keys
+never touch the VM: only their public halves are in `.env`.
 
 ## Layout
 
 ```
 src/
-  server.js              boots: checks both databases, listens, shuts down cleanly
+  server.js              boots: prints who this is, checks both databases, self-tests Cloud KMS, listens, shuts down cleanly
   app.js                 builds the Express app: CORS, JSON limit, mounts the routers
-  config/env.js          reads and validates the environment once
+  config/env.js          reads and validates the two env files once (network/testnet.env, then .env)
   db/pool.js             the shared pg pool to the keyholder's database, query() and closePool()
   db/anos-pool.js        the read-only pool to the validator's anos database, anosQuery() and closeAnosPool()
   db/transaction.js      withTransaction(fn) and the unique-violation check
   crypto/                bytes, canonical JSON, SHA-256, P-256 and ML-DSA-87 (copies of anossoftware's);
-                         aead.js (AES-256-GCM), hybrid.js (X25519 + ML-KEM-1024, spec 7.1), keyholder-keys.js (the key material, loaded at boot)
-  kms/                   kms.js (the interface), local.js and gcp.js (the providers)
-  util/                  ids, is-object, the ok/refuse/answer result shape
+                         aead.js (AES-256-GCM), hybrid.js (X25519 + ML-KEM-1024, spec 7.1), key-file.js (reads and checks the key file),
+                         keyholder-keys.js (the key material, loaded at boot from the key file and .env)
+  kms/                   kms.js (the interface, a re-export of the one provider) and gcp.js (Cloud KMS)
+  util/                  ids, is-object, the ok/refuse/answer result shape, version (the commit and tag git reports, for /health)
   auth/                  requirePod, requireModerator, requireModeratorOrAttestor, requireKeyholder; the envelope, the shared checks, nonces,
                          the masterpod client, the anos reads
   info/                  /get-keyholder-public-key
   shares/                /receive-share (receive.service.js), the moderator reads (moderator.service.js),
                          the keyholder reads and decrypt-and-forward (keyholder.service.js, forward.js);
                          wraps.js (spec section 6), share-types.js, the queries, handlers and router
-  health/                GET /health: status, uptime, database round trip
+  health/                GET /health: status, uptime, database round trip, id, commit, tag
   middleware/            404 and the central error handler
 db/
   schema.sql             the whole schema, built from nothing
 scripts/
-  setup-db.sh            role, databases, schema for each env file (idempotent)
+  setup-db.sh            role, database and schema, from network/testnet.env and the machine file (idempotent)
   reset-db.sh            drop and set up again
-  grant-anos-read.sh     the read-only role and its grants in each anos database
-  find-psql.sh           finds Homebrew's keg-only psql
-  make-keys.js           prints fresh key lines for an env file
+  grant-anos-read.sh     the read-only role and its grants in the anos database
+  find-psql.sh           finds psql
+  make-keys.js           once, on the VM: the key file and .env; prints the receiving public halves and the lines to fill
+network/
+  testnet.env            every value that is the same on every VM, committed
+deploy/
+  anos-keyholder.service the systemd unit, identical on every VM
 docs/
   schemas.md             the specification: tables, routes, objects, crypto, variables, notes from the build
   build-plan.md          how it was built

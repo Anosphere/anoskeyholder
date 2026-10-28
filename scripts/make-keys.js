@@ -1,26 +1,50 @@
-import { ECDH, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
 /**
- * Prints fresh values for every key line of a .env-keyholderN file (spec
- * sections 9 and 10). Nothing is written anywhere: copy the lines into the
- * env file. Every run prints new values.
+ * Makes this keyholder's keys and its machine file, on the VM, once:
  *
- *   npm run make-keys
+ *   npm run make-keys -- --id <N> [--key-file <path>]
  *
- * The private halves that do not belong on the keyholder are printed once,
- * as comments: the home computer's hybrid private key, and the private keys
- * of the two P-256 pairs that stand in for the YubiKeys until the real ones
- * are enrolled. Keep them where they belong and nowhere else.
+ * --id is the keyholder's number, its validator's id; the only thing
+ * anyone types. The receiving key pair (X25519 and ML-KEM-1024, which the
+ * phone encrypts every share to) and the bucket-one key (32 random bytes,
+ * which wraps bucket-one shares) are generated here and written to the key
+ * file (default ./keyholder.key: JSON { receivingX25519PrivateKey,
+ * receivingMlkemPrivateKey, bucketOneKey } in hex, mode 0600) and never
+ * shown. The receiving public halves are printed as information only: the
+ * keyholder serves them live (/get-keyholder-public-key) and nobody records
+ * them.
+ *
+ * .env is written beside it, mode 0644 so the database scripts can read it
+ * as postgres: KEYHOLDER_ID, two random database passwords and KEY_FILE
+ * with values, then the five lines that are filled by hand, each as
+ * "<fill in>" under a comment saying what goes there: the Cloud KMS key's
+ * resource name, the home computer's two public halves and the two
+ * YubiKeys' public keys, from the operator's project and keyholder GUI. No
+ * stand-in home or YubiKey keys are generated any more. Everything shared
+ * by every VM is in network/testnet.env.
+ *
+ * Both files are created with the exclusive flag. If either exists the
+ * script says which and writes nothing.
  *
  * Encodings (spec 7.2): private keys PKCS#8 DER in hex (X25519 48 bytes,
- * ML-KEM-1024 86 bytes in the seed form Node exports, P-256 as Node exports
- * it); public keys raw bytes in hex (X25519 32, ML-KEM-1024 1568, P-256 33
- * compressed). Node exports public keys as SPKI DER, a constant prefix in
- * front of the raw bytes for a fixed algorithm, which is cut off here.
+ * ML-KEM-1024 86 bytes in the seed form Node exports); public keys raw
+ * bytes in hex (X25519 32, ML-KEM-1024 1568). Node exports public keys as
+ * SPKI DER, a constant prefix in front of the raw bytes for a fixed
+ * algorithm, which is cut off here.
  */
 
-const SPKI_PREFIX_BYTES = { x25519: 12, 'ml-kem-1024': 22, p256: 26 };
-const RAW_PUBLIC_BYTES = { x25519: 32, 'ml-kem-1024': 1568, p256: 65 };
+const USAGE = 'usage: npm run make-keys -- --id <N> [--key-file <path>]';
+
+/** The repo root: where .env goes and what a relative --key-file is resolved against. */
+const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
+
+const SPKI_PREFIX_BYTES = { x25519: 12, 'ml-kem-1024': 22 };
+const RAW_PUBLIC_BYTES = { x25519: 32, 'ml-kem-1024': 1568 };
 
 const hex = (bytes) => Buffer.from(bytes).toString('hex');
 
@@ -49,44 +73,86 @@ function hybridPair() {
   };
 }
 
-/** A P-256 pair, the public key as a 33-byte compressed point. */
-function p256Pair() {
-  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  const uncompressed = rawPublic(publicKey, 'p256');
-  const compressed = ECDH.convertKey(uncompressed, 'prime256v1', undefined, undefined, 'compressed');
-  return { publicKey: hex(compressed), privateKey: pkcs8Hex(privateKey) };
+let args;
+try {
+  args = parseArgs({
+    options: {
+      id: { type: 'string' },
+      'key-file': { type: 'string', default: './keyholder.key' },
+    },
+  }).values;
+} catch (err) {
+  console.error(`${err.message}\n${USAGE}`);
+  process.exit(1);
+}
+
+const id = args.id;
+if (id === undefined || !/^[1-9][0-9]*$/.test(id)) {
+  console.error(`--id must be a positive integer, the keyholder's number (its validator's id).\n${USAGE}`);
+  process.exit(1);
+}
+const keyFile = args['key-file'];
+const keyFilePath = resolve(REPO_ROOT, keyFile);
+const envPath = resolve(REPO_ROOT, '.env');
+
+// Both existence checks before any write, so a second run never half-writes.
+const existing = [keyFilePath, envPath].filter((file) => existsSync(file));
+if (existing.length > 0) {
+  console.error(`${existing.join(' and ')} already exist${existing.length === 1 ? 's' : ''}; nothing written.`);
+  process.exit(1);
 }
 
 const receiving = hybridPair();
-const home = hybridPair();
-const yubikey1 = p256Pair();
-const yubikey2 = p256Pair();
 
-console.log(`# Receiving key pair: the phone encrypts every share to its public halves,
-# which /get-keyholder-public-key answers (raw hex, for reference):
-#   x25519 ${receiving.x25519Public}
-#   mlkem  ${receiving.mlkemPublic}
-RECEIVING_X25519_PRIVATE_KEY=${receiving.x25519Private}
-RECEIVING_MLKEM_PRIVATE_KEY=${receiving.mlkemPrivate}
+writeFileSync(
+  keyFilePath,
+  `${JSON.stringify(
+    {
+      receivingX25519PrivateKey: receiving.x25519Private,
+      receivingMlkemPrivateKey: receiving.mlkemPrivate,
+      bucketOneKey: hex(randomBytes(32)),
+    },
+    null,
+    2,
+  )}\n`,
+  { flag: 'wx', mode: 0o600 },
+);
 
-# Home computer's hybrid key: the public halves go in this file. The private
-# halves are for the home computer and nothing else; shown once (PKCS#8 DER,
-# hex), never on the VM:
-#   x25519 private ${home.x25519Private}
-#   mlkem  private ${home.mlkemPrivate}
-HOME_X25519_PUBLIC_KEY=${home.x25519Public}
-HOME_MLKEM_PUBLIC_KEY=${home.mlkemPublic}
+const FILL_IN = '"<fill in>"';
+const envLines = [
+  `KEYHOLDER_ID=${id}`,
+  `PGPASSWORD=${hex(randomBytes(16))}`,
+  `ANOS_PGPASSWORD=${hex(randomBytes(16))}`,
+  `KEY_FILE=${keyFile}`,
+  `# The Cloud KMS key's resource name, in your project and the VM's region: projects/<project>/locations/<region>/keyRings/anos-testnet/cryptoKeys/keyholder-${id}`,
+  `KMS_KEY_NAME=${FILL_IN}`,
+  '# The home computer\'s X25519 public key, raw hex (32 bytes), from the keyholder GUI.',
+  `HOME_X25519_PUBLIC_KEY=${FILL_IN}`,
+  '# The home computer\'s ML-KEM-1024 public key, raw hex (1568 bytes), from the keyholder GUI.',
+  `HOME_MLKEM_PUBLIC_KEY=${FILL_IN}`,
+  '# The first YubiKey\'s P-256 public key, a 33-byte compressed point in hex, from the keyholder GUI.',
+  `KEYHOLDER_PUBLIC_KEY_1=${FILL_IN}`,
+  '# The second YubiKey\'s P-256 public key, a 33-byte compressed point in hex, from the keyholder GUI.',
+  `KEYHOLDER_PUBLIC_KEY_2=${FILL_IN}`,
+  '',
+];
+writeFileSync(envPath, envLines.join('\n'), { flag: 'wx', mode: 0o644 });
+// The umask may have narrowed the mode at creation; postgres has to read it.
+chmodSync(envPath, 0o644);
 
-# Two P-256 pairs standing in for the two YubiKeys until the real ones are
-# enrolled (then put the YubiKeys' public keys here instead). The private
-# keys are shown once (PKCS#8 DER, hex), for the home computer's signing:
-#   key 1 private ${yubikey1.privateKey}
-#   key 2 private ${yubikey2.privateKey}
-KEYHOLDER_PUBLIC_KEY_1=${yubikey1.publicKey}
-KEYHOLDER_PUBLIC_KEY_2=${yubikey2.publicKey}
-
-# Wraps bucket-one shares (wrap env-aes-gcm-v1).
-BUCKET_ONE_KEY=${hex(randomBytes(32))}
-
-# The local KMS key, used when KMS_PROVIDER=local.
-KMS_LOCAL_KEY=${hex(randomBytes(32))}`);
+console.log(`Keyholder ${id}`);
+console.log('');
+console.log('Receiving key, the public halves the phone encrypts shares to (served live by');
+console.log('/get-keyholder-public-key; nothing to record):');
+console.log(`  x25519 ${receiving.x25519Public}`);
+console.log(`  mlkem  ${receiving.mlkemPublic}`);
+console.log('');
+console.log(`Wrote ${keyFilePath} (mode 0600, never shown) and ${envPath}.`);
+console.log('Five lines in .env are left to fill, each under a comment saying what goes there:');
+console.log('  KMS_KEY_NAME, HOME_X25519_PUBLIC_KEY, HOME_MLKEM_PUBLIC_KEY, KEYHOLDER_PUBLIC_KEY_1, KEYHOLDER_PUBLIC_KEY_2');
+console.log('');
+console.log('Next (anossoftware docs/operator-guide.md, steps 7 and 9): the database, the anos read grant, the unit:');
+console.log('');
+console.log('  sudo -u postgres sh scripts/setup-db.sh');
+console.log('  sudo -u postgres sh scripts/grant-anos-read.sh');
+console.log('  sudo cp deploy/anos-keyholder.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now anos-keyholder');

@@ -2,13 +2,23 @@
  * Reads and validates environment variables once at startup.
  * Everything else imports `env` from here instead of touching process.env,
  * so a missing or malformed variable fails at boot rather than mid-request.
- * The variables are spec section 9: one keyholder is one process is one
- * .env-keyholderN file, loaded by `KEYHOLDER=N npm start`.
+ * The variables are spec sections 9 and 14. Two files are loaded, in this
+ * order: network/testnet.env, committed, with every value that is the same
+ * on every VM of the network, then .env, the machine file
+ * scripts/make-keys.js writes, which wins where both name a variable:
+ *   node --env-file=network/testnet.env --env-file=.env src/server.js
  */
+
+/** The placeholder a value ships with before it exists (an address, a key name, a public key). */
+const FILL_IN = '<fill in>';
+
 function required(name) {
   const value = process.env[name];
   if (!value) {
     throw new Error(`Missing required environment variable: ${name}`);
+  }
+  if (value === FILL_IN) {
+    throw new Error(`${name} is still "${FILL_IN}": fill it in network/testnet.env or .env`);
   }
   return value;
 }
@@ -72,25 +82,19 @@ function requiredHex(name, bytes) {
 }
 
 /**
- * A comma-separated list of host names, each trimmed and lowercased, at
- * least one; `fallback` when the variable is not set.
+ * A required comma-separated list (the masterpod's parser, without a
+ * default): items trimmed, empty ones dropped, at least one.
  */
-function requiredHostList(name, fallback) {
-  const value = process.env[name] ?? fallback;
-  const hosts = value
-    .split(',')
-    .map((host) => host.trim().toLowerCase())
-    .filter((host) => host !== '');
-  if (hosts.length === 0) {
-    throw new Error(`${name} must list at least one host`);
-  }
-  return Object.freeze(hosts);
+function requiredList(name) {
+  const value = required(name);
+  const items = value.split(',').map((item) => item.trim()).filter((item) => item !== '');
+  if (items.length === 0) throw new Error(`${name} must list at least one item, got "${value}"`);
+  return Object.freeze(items);
 }
 
-/** `local` (AES-256-GCM under KMS_LOCAL_KEY, this Mac) or `gcp` (Cloud KMS, the VM). */
-const kmsProvider = process.env.KMS_PROVIDER ?? 'local';
-if (kmsProvider !== 'local' && kmsProvider !== 'gcp') {
-  throw new Error(`KMS_PROVIDER must be "local" or "gcp", got "${kmsProvider}"`);
+/** A required comma-separated list of host names, each lowercased. */
+function requiredHostList(name) {
+  return Object.freeze(requiredList(name).map((host) => host.toLowerCase()));
 }
 
 export const env = Object.freeze({
@@ -100,8 +104,14 @@ export const env = Object.freeze({
   // This keyholder's number: its validator's id, answered as keyholderId.
   keyholderId: requiredInteger('KEYHOLDER_ID'),
 
+  // The key file scripts/make-keys.js wrote (JSON, mode 0600): the receiving
+  // pair and the bucket-one key, relative to the repo root or absolute.
+  // src/crypto/key-file.js checks and reads it, src/crypto/keyholder-keys.js
+  // loads it at boot. No private value passes through the environment.
+  keyFile: process.env.KEY_FILE || './keyholder.key',
+
   // The keyholder's own database. Variable names follow libpq (PGHOST,
-  // PGUSER, ...), so psql and other PostgreSQL tools read the same env file
+  // PGUSER, ...), so psql and other PostgreSQL tools read the same env files
   // without any translation.
   db: Object.freeze({
     host: process.env.PGHOST ?? '127.0.0.1',
@@ -133,26 +143,21 @@ export const env = Object.freeze({
     }),
   }),
 
-  // The phone's origin: the CORS allow-list (src/app.js).
-  webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:4200',
+  // The phone's origins, a comma-separated list: the CORS allow-list
+  // (src/app.js). Required; in network/testnet.env.
+  webOrigins: requiredList('WEB_ORIGIN'),
 
   // Where /get-anopod-session-keys is (src/auth/masterpod.client.js).
-  masterpodUrl: (process.env.MASTERPOD_URL ?? 'http://localhost:3100').replace(/\/+$/, ''),
+  // Required; in network/testnet.env. A trailing slash is dropped.
+  masterpodUrl: required('MASTERPOD_URL').replace(/\/+$/, ''),
 
   // The hosts a decrypt route may post a share to (src/shares/forward.js).
-  recoveryPodHosts: requiredHostList('RECOVERY_POD_HOSTS', 'localhost,127.0.0.1'),
+  // Required; in network/testnet.env.
+  recoveryPodHosts: requiredHostList('RECOVERY_POD_HOSTS'),
 
   // How far a signed request's timestamp may be from the server clock,
   // each way. Nonces are kept twice this long.
   timestampWindowSeconds: optionalInteger('TIMESTAMP_WINDOW_SECONDS', 120),
-
-  // The receiving key pair, which the phone encrypts every share to: PKCS#8
-  // DER in hex, 48 bytes for X25519 and 86 for ML-KEM-1024 (the seed form
-  // Node exports). Loaded into key objects by src/crypto/keyholder-keys.js.
-  receiving: Object.freeze({
-    x25519PrivateKey: requiredHex('RECEIVING_X25519_PRIVATE_KEY', 48),
-    mlkemPrivateKey: requiredHex('RECEIVING_MLKEM_PRIVATE_KEY', 86),
-  }),
 
   // The home computer's hybrid public key, raw bytes in hex: the outer layer
   // of every break-glass and backup-code share (spec section 6).
@@ -168,13 +173,9 @@ export const env = Object.freeze({
     requiredHex('KEYHOLDER_PUBLIC_KEY_2', 33),
   ]),
 
-  // Wraps bucket-one shares (wrap env-aes-gcm-v1).
-  bucketOneKey: requiredHex('BUCKET_ONE_KEY', 32),
-
-  // The KMS (src/kms/): the provider, and the one variable it needs.
+  // The KMS (src/kms/): Cloud KMS, the one provider, on this key, a
+  // cryptoKeys resource name in the operator's own project and region.
   kms: Object.freeze({
-    provider: kmsProvider,
-    localKey: kmsProvider === 'local' ? requiredHex('KMS_LOCAL_KEY', 32) : undefined,
-    keyName: kmsProvider === 'gcp' ? required('KMS_KEY_NAME') : undefined,
+    keyName: required('KMS_KEY_NAME'),
   }),
 });

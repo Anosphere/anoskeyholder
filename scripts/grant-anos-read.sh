@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
-# Gives each keyholder read access to its validator's anos database. Safe to
+# Gives this keyholder read access to its validator's anos database. Safe to
 # re-run.
 #
-# For each env file given (default: every .env-keyholder<N> in the project
-# root), as a superuser over the local unix socket:
+# For each machine file given (default: .env in the project root, the file
+# make-keys wrote), with network/testnet.env loaded first and that file
+# second, as a superuser over the local unix socket:
 #   1. in the postgres database: creates the ANOS_PGUSER role if it is
 #      missing and syncs its password to ANOS_PGPASSWORD,
 #   2. in ANOS_PGDATABASE: grants CONNECT on the database, USAGE on schema
@@ -11,39 +12,36 @@
 #      reads a moderator's keys and stake and writes nothing there.
 #
 # The anos database is the validator's, created by anossoftware's own
-# db:setup; this script never creates or changes a table.
+# scripts/setup-db.sh; this script never creates or changes a table.
 #
-#   local (Homebrew):   npm run db:grant-anos-read                     # every keyholder
-#                       sh scripts/grant-anos-read.sh .env-keyholder2  # just one
-#   VM (Debian):        sudo -u postgres sh scripts/grant-anos-read.sh .env-keyholder1
+#   VM (Debian):   sudo -u postgres sh scripts/grant-anos-read.sh        # the .env make-keys wrote
+#                  sudo -u postgres sh scripts/grant-anos-read.sh .env   # the same, named
 set -eu
 
 cd "$(dirname "$0")/.."
 . scripts/find-psql.sh
 
 if [ "$#" -eq 0 ]; then
-  set -- .env-keyholder[0-9]*
-  if [ ! -f "$1" ]; then
-    echo "No .env-keyholder<N> file found. Create .env-keyholder1 from the README's Configuration section first." >&2
-    exit 1
-  fi
+  set -- .env
 fi
 
 for env_file in "$@"; do
   if [ ! -f "$env_file" ]; then
-    echo "$env_file: no such file" >&2
+    echo "$env_file: no such file. Run 'npm run make-keys -- --id <N>' first; it writes .env." >&2
     exit 1
   fi
   case $env_file in /*) ;; *) env_file="./$env_file" ;; esac
 
-  # A subshell, so one file's variables never leak into the next.
+  # A subshell, so one file's variables never leak into the next. The shared
+  # file first, the machine file second: the same order as npm start.
   (
     set -a
+    . ./network/testnet.env
     . "$env_file"
     set +a
 
-    : "${ANOS_PGDATABASE:?ANOS_PGDATABASE is not set in $env_file}"
-    : "${ANOS_PGUSER:?ANOS_PGUSER is not set in $env_file}"
+    : "${ANOS_PGDATABASE:?ANOS_PGDATABASE is not set in network/testnet.env or $env_file}"
+    : "${ANOS_PGUSER:?ANOS_PGUSER is not set in network/testnet.env or $env_file}"
     : "${ANOS_PGPASSWORD:?ANOS_PGPASSWORD is not set in $env_file}"
 
     # The role: as the current OS user over the local socket, so the app's

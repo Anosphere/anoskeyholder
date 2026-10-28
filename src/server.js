@@ -2,6 +2,12 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { anosQuery, closeAnosPool } from './db/anos-pool.js';
 import { closePool, query } from './db/pool.js';
+import { decrypt, encrypt } from './kms/kms.js';
+
+// Who this is, first. The key file was loaded by the imports above
+// (src/crypto/keyholder-keys.js), so a missing or open key file has already
+// stopped the boot by now.
+console.log(`Keyholder ${env.keyholderId}`);
 
 // Verify both database connections before accepting traffic, so a bad
 // configuration fails loudly at boot instead of on the first request.
@@ -24,6 +30,25 @@ try {
   );
 } catch (err) {
   console.error('Could not connect to the anos database:', err.message);
+  process.exit(1);
+}
+
+// Cloud KMS, the same way: a fixed plaintext encrypted and decrypted through
+// src/kms/kms.js, so a wrong key name, a missing role or an unreachable API
+// fails here, not on the first share.
+try {
+  const plaintext = Buffer.from('anos keyholder kms self-test', 'utf8');
+  const aad = Buffer.from('self-test', 'utf8');
+  const decrypted = await decrypt(await encrypt(plaintext, aad), aad);
+  if (decrypted === null) {
+    throw new Error('the ciphertext did not decrypt under the key');
+  }
+  if (!decrypted.equals(plaintext)) {
+    throw new Error('the plaintext came back changed');
+  }
+  console.log('KMS ok');
+} catch (err) {
+  console.error('KMS self-test failed:', err.message);
   process.exit(1);
 }
 

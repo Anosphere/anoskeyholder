@@ -16,7 +16,7 @@ export function createApp() {
   const app = express();
 
   app.disable('x-powered-by');
-  app.use(cors({ origin: env.webOrigin }));
+  app.use(cors({ origin: env.webOrigins }));
   // The largest request is a /receive-share: a share of at most 4096 bytes
   // and an ML-DSA-87 signature of 4627 bytes, both in hex, well under 1 MB.
   app.use(express.json({ limit: '1mb' }));

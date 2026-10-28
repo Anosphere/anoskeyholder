@@ -1,5 +1,3 @@
-import { env } from '../config/env.js';
-
 /**
  * The KMS of spec section 6: one interface, encrypt(plaintext, aad) and
  * decrypt(ciphertext, aad), Buffers in and a Buffer out, both async. decrypt
@@ -7,12 +5,8 @@ import { env } from '../config/env.js';
  * Under it, every bucket-two share and the KMS layer of every break-glass
  * and backup-code share, and every public ledger id.
  *
- * The provider is chosen once from KMS_PROVIDER: `gcp` is Cloud KMS on the
- * VM (gcp.js), `local` is AES-256-GCM under KMS_LOCAL_KEY on this Mac
- * (local.js). The import is dynamic, so a local keyholder never loads
- * Google's client library.
+ * Cloud KMS (gcp.js, on the key KMS_KEY_NAME) is the one provider since the
+ * testnet build; src/server.js round-trips a fixed plaintext through it at
+ * boot, before listening, and stops when that fails.
  */
-const provider = env.kms.provider === 'gcp' ? await import('./gcp.js') : await import('./local.js');
-
-export const encrypt = provider.encrypt;
-export const decrypt = provider.decrypt;
+export { encrypt, decrypt } from './gcp.js';

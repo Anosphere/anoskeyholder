@@ -6,8 +6,8 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --env-file=.env-keyholder$KEYHOLDER src/server.js",
-    "dev": "node --watch --env-file=.env-keyholder$KEYHOLDER src/server.js",
+    "start": "node --env-file=network/testnet.env --env-file=.env src/server.js",
+    "dev": "node --watch --env-file=network/testnet.env --env-file=.env src/server.js",
     "db:setup": "sh scripts/setup-db.sh",
     "db:reset": "sh scripts/reset-db.sh",
     "db:grant-anos-read": "sh scripts/grant-anos-read.sh",

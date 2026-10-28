@@ -151,7 +151,7 @@ console.log(`Wrote ${keyFilePath} (mode 0600, never shown) and ${envPath}.`);
 console.log('Five lines in .env are left to fill, each under a comment saying what goes there:');
 console.log('  KMS_KEY_NAME, HOME_X25519_PUBLIC_KEY, HOME_MLKEM_PUBLIC_KEY, KEYHOLDER_PUBLIC_KEY_1, KEYHOLDER_PUBLIC_KEY_2');
 console.log('');
-console.log('Next (the operator guide, steps 7 and 9): the database, the anos read grant, the unit:');
+console.log('Next (the operator guide, steps 8 and 10): the database, the anos read grant, the unit:');
 console.log('');
 console.log('  sudo -u postgres sh scripts/setup-db.sh');
 console.log('  sudo -u postgres sh scripts/grant-anos-read.sh');

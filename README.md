@@ -34,8 +34,8 @@ encrypted and read back by moderators.
 ## Getting started
 
 On the VM, as the user `anos`, in `/opt/anos/keyholdersoftware`, after the
-validator; anossoftware's `docs/operator-guide.md` is the whole install,
-both servers, in the order of the visit:
+validator; the operator guide, `guides/operator-guide.md`, kept beside the repos in the testnet folder,
+is the whole install, both servers, in the order of the visit:
 
 ```bash
 npm ci
@@ -280,8 +280,9 @@ and nothing else.
 
 ## On a validator's VM
 
-The install, both servers on one Debian 13 worker VM, is anossoftware's
-`docs/operator-guide.md`: the VM and its packages, the Cloud KMS key in the
+The install, both servers on one Debian 13 worker VM, is the operator
+guide, `guides/operator-guide.md`, kept beside the repos in the testnet folder:
+the VM and its packages, the Cloud KMS key in the
 operator's own project and the VM's region, the user `anos` and the two
 clones under `/opt/anos`, `make-keys` in each repo, the databases, the
 registry row and the systemd units, in the order of the onboarding visit.

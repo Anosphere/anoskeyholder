@@ -847,8 +847,8 @@ local KMS provider are gone.
   that order, inside the per-file subshell; comments and messages updated.
 - **The VM.** Debian 13, PostgreSQL 17 from Debian's own packages, Node 24
   from NodeSource, service user `anos`, both repos under `/opt/anos`, no
-  external IP (the doorman holds it). The install is anossoftware's
-  `docs/operator-guide.md`.
+  external IP (the doorman holds it). The install is the operator guide,
+  `guides/operator-guide.md`, kept beside the repos in the testnet folder.
 
 ### 14.2 Files and variables
 

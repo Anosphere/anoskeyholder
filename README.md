@@ -286,6 +286,9 @@ the VM and its packages, the Cloud KMS key in the
 operator's own project and the VM's region, the user `anos` and the two
 clones under `/opt/anos`, `make-keys` in each repo, the databases, the
 registry row and the systemd units, in the order of the onboarding visit.
+anossoftware's `scripts/bootstrap-worker.sh`, the worker line of the guide's
+Part A, installs the keyholder as well: the clone, `make-keys`, the five
+lines of `.env`, the databases and the unit.
 
 At boot the keyholder round-trips a fixed plaintext through that key and
 logs `KMS ok`; a wrong key name, a missing role on the key or an

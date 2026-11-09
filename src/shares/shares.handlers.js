@@ -1,6 +1,7 @@
 import { answer } from '../util/result.js';
 import { decryptAndForward, getBlobs } from './keyholder.service.js';
 import { getBucketKey, getPublicLedgerId } from './moderator.service.js';
+import { getOwner } from './owner.service.js';
 import { receiveShare } from './receive.service.js';
 import { BACKUP_CODE, BREAK_GLASS_KEY, SECURITY_BUCKET_1, SECURITY_BUCKET_2 } from './share-types.js';
 
@@ -10,6 +11,11 @@ import { BACKUP_CODE, BREAK_GLASS_KEY, SECURITY_BUCKET_1, SECURITY_BUCKET_2 } fr
  * caller is req.pod, req.moderator or req.yubikey and req.body is the
  * route's own object; the checking and storing lives in the services.
  */
+
+/** POST /get-owner (none) */
+export async function getOwnerHandler(req, res) {
+  answer(res, await getOwner(req.body));
+}
 
 /** POST /receive-share (pod) */
 export async function receiveShareHandler(req, res) {

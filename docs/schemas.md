@@ -32,13 +32,14 @@ and the `publicLedgerId`. Both are 32-byte values the phone computes and
 hands over; the keyholder stores them and computes neither. The public
 ledger id is stored encrypted and read back by moderators.
 
-Four parties talk to it. The phone deposits shares. A moderator, an anos
-account with moderator stake, asks for bucket shares and public ledger ids.
-The keyholder's own home computer, authenticated with a YubiKey, pulls
-break-glass and backup-code blobs and then has the server unwrap and
-forward them to a recovery pod. The server itself calls the masterpod once
-per deposit, to fetch the depositing pod's session keys, and posts to a
-recovery pod when told to.
+Four parties talk to it. The phone deposits shares and, when a person is
+locked out, asks which pod a lookup id belongs to (section 15). A
+moderator, an anos account with moderator stake, asks for bucket shares and
+public ledger ids. The keyholder's own home computer, authenticated with a
+YubiKey, pulls break-glass and backup-code blobs and then has the server
+unwrap and forward them to a recovery pod. The server itself calls the
+masterpod once per deposit, to fetch the depositing pod's session keys, and
+posts to a recovery pod when told to.
 
 ## 1. Conventions
 
@@ -85,7 +86,7 @@ Four levels. A route's level is given with the route in section 5.
 
 | Level | Meaning | Routes |
 | ----- | ------- | ------ |
-| none | Plain JSON body, no signature. | `/get-keyholder-public-key` |
+| none | Plain JSON body, no signature. | `/get-keyholder-public-key`, `/get-owner` |
 | pod | Signed by an anoPod's current masterpod session keys, both signatures (section 3.1). | `/receive-share` |
 | moderator | Signed by an anos account's primary key pair, both signatures, and the account holds moderator stake (3.2). | `/get-security-bucket-one-key`, `/get-security-bucket-two-key`, `/get-public-ledger-id` |
 | keyholder | One P-256 signature by either of the two YubiKeys listed in the env file (3.3). | `/get-break-glass-key`, `/get-backup-code`, `/decrypt-break-glass-key`, `/decrypt-backup-code` |
@@ -246,7 +247,7 @@ Rows are deleted as they expire by the insert that adds a new one.
 
 ## 5. Routes
 
-Every route is a `POST` with a JSON body. The level `none` route takes the
+Every route is a `POST` with a JSON body. The level `none` routes take the
 body as shown; every other route takes the section 3 envelope and the body
 shown is `payload.body`. Checks run in the order listed and stop at the
 first failure. Every multi-row write is one database transaction.
@@ -558,7 +559,8 @@ section 14.
   including what it does with the posted share.
 - Discovery: how the real phone learns the five keyholders and their keys.
   The app hardcodes them.
-- Anti-abuse limits, purging owners who never finished, metadata privacy.
+- Anti-abuse limits (no route has any, `/get-owner` of section 15
+  included), purging owners who never finished, metadata privacy.
 
 ## 12. Notes from the build
 
@@ -929,3 +931,68 @@ here; nothing in 14.1 was changed.
   no longer exists; it now sources the two files.
 - **`node --check`** passed on the ten JavaScript files written or edited.
   Nothing booted, no database was touched, no scratch file was written.
+
+## 15. The owner lookup (2026-11-08)
+
+Design settled 2026-11-08
+(`~/Desktop/Z-TestNet/forclaude/recovery-lookup-plan-1.md`). A locked-out
+person recovering an anoPod had to type the username of the pod they lost,
+and people forget it. The lookup id, which the wallet computes from the
+nine birth record fields, is the key every keyholder files a person under,
+and the owners row holds the anoPod id of the pod that deposited the
+shares. So the wallet now asks every keyholder at once which pod a lookup
+id belongs to, all with the deposit's 15 second limit, found when any
+answers `200`; the masterpod then names the account from the id, and the
+username step is gone. Nothing else changes: the shares, their crypto, the
+eight signed routes and the moderator's reads are untouched, and the
+masterpod stays unable to link a birth record to a pod. Built by the same
+plan, step 1.
+
+### 15.1 The route
+
+Level none (section 2): a plain JSON body, no envelope, no middleware. A
+locked-out person has nothing to sign with, so the route is unsigned like
+`/get-keyholder-public-key`: anyone who knows a person's full birth record
+can learn that an account exists and its anoPod id, as anyone who knew a
+username could before, and limits on it stay on the deferred list of
+section 11.
+
+| Method | Path | Body | Answers |
+| ------ | ---- | ---- | ------- |
+| POST | `/get-owner` | `{ lookupId }` | `200 { lookupId, anopodId, keyholderId }` |
+
+Checks, in order:
+
+1. The body is an object and `lookupId` a string; `400 bad request shape`.
+2. `lookupId` decodes to 32 bytes; `400 invalid lookupId`.
+3. An owners row for it; `404 unknown lookup id`.
+
+`anopodId` is `owners.anopod_id` in hex, the pod that deposited the first
+share, answered in full: the wallet needs it for the masterpod's challenge
+and as the recovery passkey's user handle. `keyholderId` is `KEYHOLDER_ID`,
+as in every answer. Nothing is decrypted: the public ledger id is not read.
+Refusals are logged `failed: <reason>` like every other route.
+
+### 15.2 Notes from the build
+
+Built 2026-11-08 straight from this section and the plan. Where the plan
+was silent, the simplest thing was chosen and is recorded here; nothing in
+15.1 was changed.
+
+- **The service** is `src/shares/owner.service.js`, `getOwner(body)`: the
+  checks of `moderator.service.js`'s `checkRead` without the response key,
+  then the answer. `findOwner` in `shares.queries.js` already existed; no
+  query, table, env line, middleware or KMS call was added or changed.
+- **The handler** `getOwnerHandler` is first in `shares.handlers.js`,
+  before `/receive-share`, as the route is first in the router. It reads
+  `req.body` as the plain body, since no middleware is in front of it; the
+  file's header comment, which describes the signed routes, was left as it
+  was.
+- **The router** registers `/get-owner` first, before `/receive-share`,
+  with no middleware. The route stays in the shares feature, beside the
+  owners queries it reads, rather than in `info/` with the other unsigned
+  route; `app.js` keeps its one `sharesRouter` mount and its comment names
+  the route.
+- **`node --check`** passed on the four JavaScript files. No keyholder was
+  booted and no database was touched; the wallet, step 4 of the plan, is
+  the first caller.

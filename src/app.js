@@ -24,7 +24,7 @@ export function createApp() {
   // Feature routers. Each feature folder owns its router, service, etc.
   app.use('/health', healthRouter);
   app.use(infoRouter); // owns /get-keyholder-public-key
-  app.use(sharesRouter); // owns /receive-share, the three moderator routes and the four keyholder routes
+  app.use(sharesRouter); // owns /get-owner, /receive-share, the three moderator routes and the four keyholder routes
 
   // Order matters: these must come after every router.
   app.use(notFound);

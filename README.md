@@ -119,6 +119,7 @@ Hex is the wire form for every byte string.
 | Route                           | Level     | Does                                                                                       |
 | ------------------------------- | --------- | ------------------------------------------------------------------------------------------ |
 | `/get-keyholder-public-key`     | none      | `{ keyholderId, receivingKey: { x25519, mlkem } }`: the public halves the phone encrypts every share to |
+| `/get-owner`                    | none      | `{ lookupId }` in, `{ lookupId, anopodId, keyholderId }` out: the anoPod id that deposited for a lookup id, for a locked-out person's wallet (since 2026-11-08, `docs/schemas.md` section 15) |
 | `/receive-share`                | pod       | Deposits one share: `{ lookupId, publicLedgerId, shareType, keyId, share }`, the share encrypted to the receiving key; the first share for a lookup id writes the owner; `201 { shareId, keyholderId }` |
 | `/get-security-bucket-one-key`  | moderator or attestor | Every `securitybucket1` share of a lookup id, newest first, each encrypted to the caller's one-time `responseKey` |
 | `/get-security-bucket-two-key`  | moderator or attestor | The same for `securitybucket2`                                                 |
@@ -315,7 +316,8 @@ src/
                          the masterpod client, the anos reads
   info/                  /get-keyholder-public-key
   shares/                /receive-share (receive.service.js), the moderator reads (moderator.service.js),
-                         the keyholder reads and decrypt-and-forward (keyholder.service.js, forward.js);
+                         the keyholder reads and decrypt-and-forward (keyholder.service.js, forward.js),
+                         the unsigned owner lookup /get-owner (owner.service.js);
                          wraps.js (spec section 6), share-types.js, the queries, handlers and router
   health/                GET /health: status, uptime, database round trip, id, commit, tag
   middleware/            404 and the central error handler

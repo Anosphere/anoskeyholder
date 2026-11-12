@@ -1,4 +1,6 @@
 import { env } from '../config/env.js';
+import { insertWaitingCopy } from '../copies/copies.queries.js';
+import { startCopyRun } from '../copies/copies.service.js';
 import { decodeBytes } from '../crypto/bytes.js';
 import { decryptHybrid } from '../crypto/hybrid.js';
 import { receivingPrivateKeys } from '../crypto/keyholder-keys.js';
@@ -66,6 +68,9 @@ export async function receiveShare(pod, body) {
     await withTransaction(async (client) => {
       if (ownerRow !== null) await insertOwner(client, ownerRow);
       await insertShare(client, { shareId, lookupId, shareType, keyId, share, wrap });
+      // The share waits for its copy from the moment it is saved (spec
+      // section 16); the row goes once the share's file is in the bucket.
+      await insertWaitingCopy(client, shareId);
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -75,6 +80,10 @@ export async function receiveShare(pod, body) {
     }
     throw err;
   }
+
+  // The copy run is told to start. It works in the background: the answer
+  // below does not wait for it, and nothing it does can fail the deposit.
+  startCopyRun();
 
   return ok(201, { shareId: toHex(shareId), keyholderId: env.keyholderId });
 }

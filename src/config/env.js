@@ -178,4 +178,11 @@ export const env = Object.freeze({
   kms: Object.freeze({
     keyName: required('KMS_KEY_NAME'),
   }),
+
+  // The share copies (src/copies/): the bucket every share is also written
+  // to, <project id>-share-copies, in the operator's own project. Required.
+  // The line is not from make-keys: scripts/set-copies-bucket.sh writes it.
+  shareCopies: Object.freeze({
+    bucket: required('SHARE_COPIES_BUCKET'),
+  }),
 });

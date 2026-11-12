@@ -1,4 +1,5 @@
 import { env } from '../config/env.js';
+import { countWaitingCopies } from '../copies/copies.queries.js';
 import { query } from '../db/pool.js';
 import { version } from '../util/version.js';
 
@@ -11,6 +12,20 @@ export async function checkDatabase() {
   } catch (err) {
     console.error('Database health check failed:', err.message);
     return { status: 'unreachable' };
+  }
+}
+
+/**
+ * The share copies (src/copies/): how many shares wait for their copy in
+ * the bucket. A number that stays above zero means the bucket has stopped
+ * taking files. Null when the count fails, which the database check above
+ * then reports; this field never changes the status.
+ */
+export async function checkCopies() {
+  try {
+    return { waiting: await countWaitingCopies() };
+  } catch {
+    return { waiting: null };
   }
 }
 

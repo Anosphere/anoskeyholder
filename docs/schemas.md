@@ -996,3 +996,398 @@ was silent, the simplest thing was chosen and is recorded here; nothing in
 - **`node --check`** passed on the four JavaScript files. No keyholder was
   booted and no database was touched; the wallet, step 4 of the plan, is
   the first caller.
+
+## 16. Share copies in a bucket (2026-11-12)
+
+Design settled 2026-11-12 in a planning chat
+(`~/Desktop/Z-TestNet/forclaude/keyholder-share-copies-plan-1.md`, FINAL)
+and built the same day, in one chat, from that file. Every worker's disk
+is copied to its vault every 4 hours (step 12 of the Cloud Shell line,
+doormansoftware `docs/schemas.md` section 10). A worker that is lost and
+restored from its vault lacks the shares that arrived after the last copy,
+up to 4 hours of them, and on that keyholder those shares exist nowhere
+else. So every share is now also written, as one small file, to a bucket
+in the banker's own project whose 365 days are locked. This closes the gap
+for the keyholder's own data and for nothing else: a restored validator
+catches up from the other validators. The first idea was to send
+PostgreSQL's journal to a bucket with pgBackRest. It was dropped: it
+copies the whole PostgreSQL, it rewrites and deletes its own files, and
+its restore is longer, while the keyholder only ever adds rows and can
+write each new row to a bucket itself. Nothing about the routes, their
+checks, the wraps or the crypto changed, and no package was added.
+
+### 16.1 The decisions
+
+- **Only the keyholder's data.** Not the anos database, no pgBackRest, no
+  WAL.
+- **The bucket** is `<project id>-share-copies`, in the banker's own
+  project and the worker's region, closed to the public, every file kept
+  365 days and the 365 days locked, which puts a lien on the project as
+  the key bucket does. No filter by address and no old versions. The
+  Cloud Shell line makes it: step 15 of doormansoftware's
+  `scripts/bootstrap-project.sh` (its `docs/schemas.md` section 11).
+- **The worker's Google account may add files and nothing more**:
+  `roles/storage.objectCreator` on the bucket. Reading can be given later
+  with one line.
+- **Every share gets a row in `waiting_copies` in the transaction that
+  saves it.** The row is deleted when the file is in the bucket. Were the
+  row added only after a failed write, a keyholder that stops between the
+  save and the write would leave a share with no copy and no trace.
+- **A deposit never fails or waits because of a copy.** The `201` goes
+  out after the save, as before, and the copy starts right after, in the
+  background. When the bucket cannot be written the share waits in the
+  table and is written when the bucket works again.
+- **Waiting copies are tried again every 60 seconds and at every start.**
+- **One file per share.** It holds the share's row and its owner's row,
+  so a file is complete on its own.
+- **No new package.** Two calls with Node's own `fetch`. A package would
+  have meant an install on all 25 workers on the weekend the code is
+  frozen, and more outside code beside the keyholder's key.
+  `package.json` and `package-lock.json` are untouched.
+- **The bucket's name is its own line in `.env`**, `SHARE_COPIES_BUCKET`,
+  not worked out from the KMS key name: a setting does one job. Its own
+  small script writes it; `scripts/make-keys.js` is unchanged and still
+  leaves five lines to fill.
+- **A test at every start.** One small test file goes to the bucket and
+  the keyholder prints `ok` or the reason. It never stops the start.
+- **Not the direct path to Google** (Private Google Access). The worker's
+  calls to the bucket leave through the doorman, like its other calls.
+- **No restore script.** The rows are put back by hand on the day a
+  worker is lost for good (16.9).
+
+### 16.2 The table
+
+In `db/schema.sql`, after `nonces`, with a comment block and a `COMMENT
+ON` for the table and both columns:
+
+```sql
+CREATE TABLE IF NOT EXISTS waiting_copies (
+  share_id   BYTEA       PRIMARY KEY CHECK (octet_length(share_id) = 32),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS waiting_copies_created_at_idx ON waiting_copies (created_at);
+```
+
+One row per share whose copy is not in the bucket yet. It is not
+append-only: the copy run deletes a row once its file is in the bucket.
+No foreign key, as everywhere in this schema. `created_at` equals the
+share's, since one transaction writes both and `now()` is the
+transaction's time.
+
+### 16.3 A deposit
+
+`receiveShare` (`src/shares/receive.service.js`, 5.2) has two additions
+and nothing else:
+
+1. Inside the transaction, after the share's insert: a row in
+   `waiting_copies` with the share's id.
+2. After the transaction, before the `201`: the copy run is told to start
+   (`startCopyRun`). The deposit does not wait for it, and nothing the
+   copy run does can fail the deposit.
+
+Every check, every refusal and the `201` are as they were.
+
+### 16.4 The copy run
+
+`src/copies/copies.service.js`. One run at a time: a run that is asked
+for while one is going starts when that one ends.
+
+A run takes the waiting rows, oldest first (`created_at`, then
+`share_id`), 100 at a time. For each one it reads the share's row and its
+owner's row in one query, writes the file (16.5, 16.6) and deletes the
+waiting row. It goes on until no row is left. When the bucket does not
+take a file, the run stops there and leaves the rest waiting.
+
+A run starts in three cases: when the keyholder has started to listen,
+after every deposit, and every 60 seconds.
+
+### 16.5 The file
+
+The name is `shares/<day>/<share id>.json`. The day is the date of the
+share's `created_at` in UTC, as `2026-11-16`. The share id is its 64 hex
+characters.
+
+The content is JSON, with two-space indentation. Every byte column is in
+hex. The times are as PostgreSQL holds them, in UTC with microseconds, so
+a row can be put back exactly.
+
+```json
+{
+  "version": 1,
+  "keyholderId": 7,
+  "share": {
+    "shareId": "<64 hex>",
+    "lookupId": "<64 hex>",
+    "shareType": "securitybucket1",
+    "keyId": "<64 hex>",
+    "share": "<hex, the bytes as stored>",
+    "wrap": "env-aes-gcm-v1",
+    "createdAt": "2026-11-16T03:04:05.123456Z"
+  },
+  "owner": {
+    "lookupId": "<64 hex>",
+    "publicLedgerId": "<hex, the KMS ciphertext as stored>",
+    "anopodId": "<64 hex>",
+    "createdAt": "2026-11-16T03:04:05.123456Z"
+  }
+}
+```
+
+A file holds what the two rows hold and nothing more. A share is as
+wrapped as it is in the database (section 6), and no key is in the bucket.
+
+### 16.6 The calls to Google
+
+`src/copies/bucket.js`: two calls with `fetch`. Each has 10 seconds to
+answer in a copy run and 5 seconds in the test at a start.
+
+The token, from the worker's metadata server, kept in memory until 60
+seconds before it ends, never printed:
+
+```
+GET http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
+Metadata-Flavor: Google
+```
+
+It answers `{ "access_token", "expires_in", "token_type" }`,
+`expires_in` in seconds.
+
+The upload:
+
+```
+POST https://storage.googleapis.com/upload/storage/v1/b/<bucket>/o?uploadType=media&name=<the file's name, URL-encoded>&ifGenerationMatch=0
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+- `200`: the file is in the bucket.
+- `412`: a file of that name is already there, from an earlier try. It
+  counts as written.
+- `401`: the kept token is dropped and this file is tried once more with
+  a new one.
+- Anything else, or no answer: the bucket did not take the file.
+
+`<bucket>` is the value of `SHARE_COPIES_BUCKET` (16.7).
+
+### 16.7 The `.env` line and its script
+
+`SHARE_COPIES_BUCKET=<project id>-share-copies`, in the keyholder's
+`.env`. `src/config/env.js` requires it, as it requires `KMS_KEY_NAME`: a
+keyholder without the line does not start and says `Missing required
+environment variable: SHARE_COPIES_BUCKET`. In code:
+`env.shareCopies.bucket`.
+
+The line is written by `scripts/set-copies-bucket.sh`. It takes no
+argument and runs as the user that owns `.env`:
+
+```bash
+sudo -iu anos sh /opt/anos/keyholdersoftware/scripts/set-copies-bucket.sh
+```
+
+1. It reads the project id from the worker's own metadata server
+   (`project/project-id`), the call the worker script makes for the KMS
+   key name.
+2. `.env` has no `SHARE_COPIES_BUCKET` line: it adds a comment line and
+   the line, at the end.
+3. The line is there with the same name: it changes nothing.
+4. The line is there with another name: it stops and names both.
+5. There is no `.env`, or the metadata server does not answer: it stops
+   and says which.
+
+It prints one line: `SHARE_COPIES_BUCKET: written <project id>-share-copies`
+or `SHARE_COPIES_BUCKET: already <project id>-share-copies`.
+
+Three places run it, so every `.env` gets the line the same way: the
+worker paste of the last validator pull, for the 25 workers that exist
+(`~/Desktop/Z-TestNet/test_net_phase_3_launch/last-set-up-commands.md`,
+step 4); anossoftware's `scripts/bootstrap-worker.sh`, at point 10.3,
+before it starts or restarts the keyholder, for a validator set up later
+(its `docs/schemas.md` section 30); and the operator guide's step 7, by
+hand, as point 4. `.example.env` has the line at the end, under the
+comment the script writes.
+
+### 16.8 The start, the test, health and the log lines
+
+At a start (`src/server.js`), after `KMS ok` and before the keyholder
+listens:
+
+1. The waiting rows are counted and one line is printed. When the count
+   fails, which is what a missing table does, the keyholder prints `Share
+   copies could not start: <message>` and stops, as it does for KMS.
+
+```
+Share copies: bucket <project id>-share-copies, 0 waiting
+```
+
+2. The test. The keyholder writes one small file, `tests/<day>/<time>.json`,
+   and prints one of two lines. It then listens whatever the answer was.
+
+```
+Share copies: test file ok
+Share copies: the bucket did not take the test file: <reason>
+```
+
+   The file holds `{"version":1,"keyholderId":<n>,"test":true,"at":"<time>"}`,
+   `<time>` being the moment of the test to the millisecond,
+   `2026-11-16T03:04:05.123Z`, in the name and in the file. It stays in
+   the bucket for its 365 days, like every file. One per start.
+
+3. The keyholder listens, and the first copy run starts.
+
+So a start now prints seven lines: `Keyholder <id>`, the two PostgreSQL
+lines, `KMS ok`, the two `Share copies` lines, then listening.
+
+`GET /health` gains one field after `db`. It does not change the `200` or
+the `503`. `waiting` is `null` when the count fails.
+
+```json
+"copies": { "waiting": 0 }
+```
+
+Two log lines from the copy run, each printed once when the state
+changes, never once per file:
+
+```
+Share copies: the bucket did not take a file, <n> waiting: <reason>
+Share copies: the bucket takes files again, <n> written
+```
+
+`<reason>`, in these lines and in the test's, is `<status> <Google's own
+message>`, or `no token from the metadata server: <why>`, or `no answer
+from Cloud Storage: <why>`.
+
+### 16.9 Not built, and a lost worker
+
+If a worker is lost: by hand for now. First the vault restore (operator
+guide, step 12). The restored keyholder then lacks the shares that came
+after that vault copy. Their files are in the bucket, in the day folders
+from the copy's day onward. Each file holds every column of its share row
+and of its owner row, so each row can be put back with one `INSERT`; rows
+that are already there are skipped by their keys. The banker's own login
+can read the bucket from Cloud Shell.
+
+Not built:
+
+- A restore script that reads the bucket and puts back the rows a
+  restored keyholder lacks. After production.
+- Nobody is told when a bucket stops taking files. The number in
+  `/health` and the lines in the keyholder's journal are all there is.
+- The worker's account may hold the Editor role in a banker's project;
+  Google gives it to that account by default in many projects. Where it
+  does, the account can also read the bucket, and delete a file once it
+  is older than 365 days. The lock is what protects the files, not the
+  permission. Narrowing that account is not in this build.
+- After 365 days a file can be deleted by the banker. Nothing deletes one
+  by itself.
+- The bucket holds only what this keyholder received. A keyholder that
+  was down during a deposit still misses that share: keyholder catch-up,
+  after production.
+- Shares that are in a keyholder's database before this build get no
+  copy. The worker paste of the last validator pull empties every
+  keyholder's database, so there are none.
+- The vault stays as built. The key file and the settings are only in the
+  vault copy.
+
+### 16.10 Files
+
+New: `src/copies/bucket.js` (the two calls), `src/copies/copies.queries.js`
+(the waiting row's insert, the count, the list, the read of a share with
+its owner, the delete), `src/copies/copies.service.js` (the copy run, its
+start and its 60 seconds, the test, the log lines),
+`scripts/set-copies-bucket.sh`.
+
+Changed: `db/schema.sql` (the table), `src/shares/receive.service.js`
+(the two additions), `src/config/env.js` (`SHARE_COPIES_BUCKET`),
+`src/server.js` (the start), `src/health/health.service.js` and
+`src/health/health.router.js` (the field), `.example.env`, `README.md`
+(Scripts, Database tables, the new "Share copies", Configuration, Layout),
+this file.
+
+Not changed: `package.json`, `package-lock.json`, `scripts/make-keys.js`
+and the other scripts, `deploy/`, `network/testnet.env`.
+
+### 16.11 Notes from the build
+
+Where the plan was silent, the simplest thing was chosen and is recorded
+here; nothing in 16.1 to 16.9 was changed.
+
+- **The build was made on main at b555e60**, with a clean working tree.
+- **Google's pages for the two calls were read before the code was
+  written**, as the plan asks for the token call. The token:
+  `docs.cloud.google.com/compute/docs/access/authenticate-workloads` has
+  the path, the `Metadata-Flavor: Google` header and the answer
+  `{ access_token, expires_in, token_type }` as the plan has them. Its
+  example writes the host as `metadata.google.internal`;
+  `docs.cloud.google.com/compute/docs/metadata/querying-metadata` lists
+  `http://169.254.169.254/computeMetadata/v1` as the same server by its
+  address. The code keeps the address, as the plan has it and as the
+  worker script calls it. The page does not name the unit of
+  `expires_in` (its example is `3599`); the code takes seconds, as OAuth
+  2.0 defines the field. The page says the metadata server itself hands
+  out the same token until 5 minutes before it ends, so a token asked for
+  60 seconds before the kept one ends is a new one. The upload:
+  `docs.cloud.google.com/storage/docs/uploading-objects` and
+  `.../storage/docs/json_api/v1/objects/insert` have the URL, the two
+  headers and `200` with the file's metadata;
+  `.../storage/docs/request-preconditions` has the `412` for a name that
+  is already there. Nothing differed from the plan.
+- **The `412` was not seen, and one thing about it is not on Google's
+  pages.** They say an upload needs the permission to delete "only if
+  the request causes an object with the same name to be overwritten",
+  and that with `ifGenerationMatch=0` a name that exists fails the
+  request with `412`. They do not say in so many words what an account
+  that may only create is answered when it writes a name a second time:
+  `412`, as the code expects, or `403`. A second write of one name
+  happens only when a file went in and its waiting row stayed: the
+  keyholder stopped between the two, or the `200` was lost on the way.
+  If the answer were `403`, the run would stop at that row every time,
+  the rows after it would wait, the number in `/health` would grow and
+  the journal would have the line with Google's message. The trial on
+  validator 1 does not write a name twice.
+- **The status alone decides.** The answer's body is read to its end and
+  ignored after a `200` or a `412`, so a body that breaks off cannot turn
+  a written file into a failure. After a refusal the body gives Google's
+  message, cut to 300 characters on one line.
+- **No token text can reach a log line.** A token answer that is not
+  JSON, has no token or no `expires_in` is reported in fixed words, never
+  quoted. A reason holds a status and Google's message, or Node's cause
+  for a call that got no answer.
+- **`401`** drops the kept token and tries the file once more, in a run
+  and in the test alike. So the test's two calls can become four; each
+  still has its 5 seconds.
+- **A third log line**, for a run that stops on an error of its own,
+  which is the database as a rule: `Share copies: the copy run stopped:
+  <message>`, printed once when that state begins, like the other two.
+  The plan names two lines, and both are about the bucket.
+- **`<n> written`** is the number of files written by the run that
+  emptied the table. The line is not printed when that run wrote none.
+- **The share file ends with a newline; the test file is one line**, as
+  the plan shows each.
+- **The times are made in the query**:
+  `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.
+  `pg` would hand back a `Date`, which keeps milliseconds only.
+- **A waiting row whose share or owner is missing** cannot come from this
+  server: one transaction writes all three, and `owners` and `shares`
+  refuse `DELETE`. If one is ever found, the run stops there with the
+  third line.
+- **The count line is printed by `server.js`**, the test and the runs by
+  `copies.service.js`. `/health` makes its two checks at once, so the
+  count adds nothing to the wait when the database does not answer.
+- **The 60-second timer is unref-ed** and shutdown is as it was. A run in
+  flight when the pools close ends on the pool's error and may print the
+  third line once as the process exits.
+- **The script** gives `curl` 10 seconds and writes the project id only
+  when it is made of lowercase letters, digits and hyphens, since the
+  database scripts source `.env`. Its comment line in `.env` is the one
+  in `.example.env`.
+- **Left as they were, since the plan does not list them:** the README's
+  "Getting started" (it does not name the script) and "Running" (its
+  boot log shows five lines; a start prints seven now), the header
+  comments of `db/schema.sql` and `src/config/env.js`, and section 14
+  above, whose list of the lines in `.env` has nine names.
+- **Checks.** `node --check` passed on the eight JavaScript files written
+  or edited and `sh -n` on the script. `node --check` does not link
+  imports, so every imported name was read against its module's exports
+  by hand. Nothing was run: no keyholder, no database, no call to Google.
+  The first start on validator 1's worker is the test (the plan's
+  section 5).

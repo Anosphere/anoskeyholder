@@ -1,5 +1,7 @@
 import { createApp } from './app.js';
 import { env } from './config/env.js';
+import { countWaitingCopies } from './copies/copies.queries.js';
+import { startShareCopies, testShareCopies } from './copies/copies.service.js';
 import { anosQuery, closeAnosPool } from './db/anos-pool.js';
 import { closePool, query } from './db/pool.js';
 import { decrypt, encrypt } from './kms/kms.js';
@@ -52,10 +54,26 @@ try {
   process.exit(1);
 }
 
+// The share copies (src/copies/, spec section 16). First the shares that
+// still wait for their copy are counted, so a database without the
+// waiting_copies table stops the boot here, like the checks above. Then one
+// small test file goes to the bucket: its line says ok or the reason, and
+// the boot goes on whatever the answer was.
+try {
+  const waiting = await countWaitingCopies();
+  console.log(`Share copies: bucket ${env.shareCopies.bucket}, ${waiting} waiting`);
+} catch (err) {
+  console.error('Share copies could not start:', err.message);
+  process.exit(1);
+}
+await testShareCopies();
+
 const app = createApp();
 
 const server = app.listen(env.port, () => {
   console.log(`Keyholder ${env.keyholderId} listening on http://localhost:${env.port}`);
+  // The first copy run, then one every 60 seconds.
+  startShareCopies();
 });
 
 let shuttingDown = false;

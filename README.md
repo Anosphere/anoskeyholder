@@ -58,6 +58,7 @@ VM answers this keyholder's receiving key.
 | `npm run db:setup`               | Create the role, the database and the schema (idempotent; adds missing tables to a live database). Loads `network/testnet.env` then `.env`; pass a machine file to use another. On the VM: `sudo -u postgres sh scripts/setup-db.sh`. |
 | `npm run db:reset`               | Drop that database and run setup again. Everything in it is lost.          |
 | `npm run db:grant-anos-read`     | In the anos database, as a superuser: create the `ANOS_PGUSER` role if missing, sync its password, grant `CONNECT`, `USAGE` on `public` and `SELECT` on `accounts` and `stakes`, nothing else. The same two files. On the VM: `sudo -u postgres sh scripts/grant-anos-read.sh`. |
+| `sh scripts/set-copies-bucket.sh` | On the VM, as the user that owns `.env`, no argument: reads the project id from the VM's metadata server and adds the line `SHARE_COPIES_BUCKET=<project id>-share-copies` to `.env`, under a comment. Changes nothing when the line is there with that name; stops, naming both, when it is there with another. Prints `SHARE_COPIES_BUCKET: written <name>` or `SHARE_COPIES_BUCKET: already <name>`. On the VM: `sudo -iu anos sh /opt/anos/keyholdersoftware/scripts/set-copies-bucket.sh`. |
 
 ## Who may call what
 
@@ -190,6 +191,7 @@ services keep the references straight. Every table and column has a
 | `owners` | One row per person: `lookup_id` as handed, `public_ledger_id` under the KMS key, the `anopod_id` that deposited first |
 | `shares` | One row per share received: the wrapped `share`, its `wrap`, its `share_type`, the phone's `key_id` (unique) |
 | `nonces` | The replay cache of signed requests, one table for every signer; swept by each insert                    |
+| `waiting_copies` | One row per share whose copy is not in the bucket yet: written with the share in one transaction, deleted once the share's file is in the bucket ("Share copies" below) |
 
 Because the names follow libpq, `psql` connects to a keyholder's database with
 no arguments once its file is loaded:
@@ -197,6 +199,42 @@ no arguments once its file is loaded:
 ```bash
 set -a && . network/testnet.env && . .env && set +a && psql
 ```
+
+## Share copies
+
+Every share the keyholder saves is also written, as one small JSON file,
+to a bucket in the operator's own project, `SHARE_COPIES_BUCKET`, where no
+file can be deleted or replaced for 365 days. The worker's disk is copied
+to its vault every 4 hours; a worker restored from the vault lacks the
+shares that came after the last copy, and their files are in the bucket.
+`docs/schemas.md` section 16 has all of it.
+
+- A deposit adds a `waiting_copies` row in the transaction that saves the
+  share, and answers `201` as before. The copy starts right after, in the
+  background (`src/copies/`): the share's row and its owner's row go to
+  `shares/<day>/<share id>.json`, every byte column in hex, the share as
+  wrapped as it is in the database, and the waiting row is deleted.
+- When the bucket does not take a file, no deposit fails: the share waits
+  in the table. Waiting copies are tried again every 60 seconds and at
+  every start.
+- The two calls to Google, a token from the VM's metadata server and the
+  upload, are made with Node's own `fetch`; there is no package for them.
+  The worker's service account may add files to the bucket and nothing
+  more (`roles/storage.objectCreator`).
+- At a start, after `KMS ok` and before it listens, the keyholder prints
+  `Share copies: bucket <name>, <n> waiting`, writes one test file,
+  `tests/<day>/<time>.json`, and prints `Share copies: test file ok` or
+  `Share copies: the bucket did not take the test file: <reason>`. The
+  test never stops the start. A database without the `waiting_copies`
+  table does: `Share copies could not start: <message>`.
+- `GET /health` carries `"copies": { "waiting": <n> }` after `db`. A
+  number that stays above zero means the bucket has stopped taking files;
+  the journal then has `Share copies: the bucket did not take a file, <n>
+  waiting: <reason>`, once, and `Share copies: the bucket takes files
+  again, <n> written` when it works again.
+- The bucket is made by the Cloud Shell line (operator guide, step 15).
+  Nothing here reads the bucket: putting rows back after a lost worker is
+  done by hand for now.
 
 ## Configuration
 
@@ -210,7 +248,9 @@ once at boot.
 - `.env`, git-ignored: what differs per machine, written by
   `npm run make-keys -- --id <N>`: four lines with values and five left as
   `<fill in>` for the operator, each under a comment saying what goes there.
-  `.example.env` shows them.
+  One more line, `SHARE_COPIES_BUCKET`, is written by
+  `scripts/set-copies-bucket.sh`, not by make-keys. `.example.env` shows
+  them.
 
 Shared values, in `network/testnet.env`:
 
@@ -239,6 +279,7 @@ Machine values, in `.env`:
 | `KMS_KEY_NAME`                                     | `<fill in>` from make-keys: the Cloud KMS key, `projects/<project>/locations/<region>/keyRings/anos-testnet/cryptoKeys/keyholder-<N>`, protection level HSM |
 | `HOME_X25519_PUBLIC_KEY`, `HOME_MLKEM_PUBLIC_KEY`  | `<fill in>` from make-keys: the home computer's hybrid public key, raw hex (32 and 1568 bytes), from the operator's keyholder GUI |
 | `KEYHOLDER_PUBLIC_KEY_1`, `KEYHOLDER_PUBLIC_KEY_2` | `<fill in>` from make-keys: the two YubiKeys' P-256 public keys, 33 bytes hex, from the same GUI |
+| `SHARE_COPIES_BUCKET`                              | The bucket every share is also copied to, `<project id>-share-copies`, in the operator's own project ("Share copies" above). Required: the server does not start without the line and names it. Written by `scripts/set-copies-bucket.sh` |
 
 `src/config/env.js` checks all of them at boot: `KEYHOLDER_ID` and the
 stake minimums as positive integers, the public keys as hex of the right
@@ -301,7 +342,8 @@ never touch the VM: only their public halves are in `.env`.
 
 ```
 src/
-  server.js              boots: prints who this is, checks both databases, self-tests Cloud KMS, listens, shuts down cleanly
+  server.js              boots: prints who this is, checks both databases, self-tests Cloud KMS, counts the waiting share copies and
+                         writes the test file, listens, starts the copy runs, shuts down cleanly
   app.js                 builds the Express app: CORS, JSON limit, mounts the routers
   config/env.js          reads and validates the two env files once (network/testnet.env, then .env)
   db/pool.js             the shared pg pool to the keyholder's database, query() and closePool()
@@ -319,7 +361,9 @@ src/
                          the keyholder reads and decrypt-and-forward (keyholder.service.js, forward.js),
                          the unsigned owner lookup /get-owner (owner.service.js);
                          wraps.js (spec section 6), share-types.js, the queries, handlers and router
-  health/                GET /health: status, uptime, database round trip, id, commit, tag
+  copies/                the share copies (spec section 16): bucket.js (the two calls to Google, with fetch),
+                         copies.queries.js (the waiting rows, a share with its owner), copies.service.js (the copy run, the test at a start)
+  health/                GET /health: status, uptime, database round trip, share copies waiting, id, commit, tag
   middleware/            404 and the central error handler
 db/
   schema.sql             the whole schema, built from nothing
@@ -329,6 +373,7 @@ scripts/
   grant-anos-read.sh     the read-only role and its grants in the anos database
   find-psql.sh           finds psql
   make-keys.js           once, on the VM: the key file and .env; prints the receiving public halves and the lines to fill
+  set-copies-bucket.sh   writes the SHARE_COPIES_BUCKET line into .env, from the VM's project id
 network/
   testnet.env            every value that is the same on every VM, committed
 deploy/

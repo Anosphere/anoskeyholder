@@ -126,3 +126,23 @@ CREATE INDEX IF NOT EXISTS nonces_expires_at_idx ON nonces (expires_at);
 COMMENT ON TABLE  nonces            IS 'The replay cache of signed requests, one table for every signer. A duplicate nonce is 401 replay. Expired rows are swept by the next insert.';
 COMMENT ON COLUMN nonces.nonce      IS 'The request''s nonce, 16 to 32 raw bytes, never reused.';
 COMMENT ON COLUMN nonces.expires_at IS 'now plus twice TIMESTAMP_WINDOW_SECONDS at insert, past which the timestamp check refuses the request anyway.';
+
+
+-- ---------------------------------------------------------------------------
+-- waiting_copies: one row per share whose copy is not in the bucket yet
+-- (spec section 16). /receive-share writes the row in the transaction that
+-- saves the share, and the copy run deletes it once the share's file is in
+-- the bucket SHARE_COPIES_BUCKET. So a share that is saved has its row here
+-- until its copy is written, whatever stops the keyholder in between. Not
+-- append-only: besides nonces, the one table whose rows go away.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS waiting_copies (
+  share_id   BYTEA       PRIMARY KEY CHECK (octet_length(share_id) = 32),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS waiting_copies_created_at_idx ON waiting_copies (created_at);
+
+COMMENT ON TABLE  waiting_copies            IS 'One row per share whose copy is not in the bucket yet. Written with the share in one transaction, deleted by the copy run once the share''s file is in the bucket.';
+COMMENT ON COLUMN waiting_copies.share_id   IS 'The share that waits for its copy (shares.share_id).';
+COMMENT ON COLUMN waiting_copies.created_at IS 'When the row was inserted: the same moment as its share, since one transaction writes both. The copy run takes the oldest first.';
